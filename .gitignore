@@ -1,0 +1,41 @@
+# --- Build artifacts (never commit these) ---
+
+# Hailo intermediate/final binaries (can be large and model-specific)
+*.har
+*.hef
+*.onnx
+
+# Working directory used by the pipeline scripts (DFC_WORKDIR)
+workdir/
+work/
+
+# Calibration / reference dumps
+*.npy
+*.npz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+
+# NOTE ON PROPRIETARY MATERIAL — never commit, even by accident:
+# - Hailo Dataflow Compiler wheels (`hailo_dataflow_compiler-*.whl`)
+# - Official Hailo HEF files or artifacts derived from them
+#   (.alls recipes, .hn graphs extracted from official HEFs)
+# - Hailo firmware images
+# See CONTRIBUTING.md ("Proprietary material policy").
+hailo_dataflow_compiler-*.whl
+*.hef.sha256

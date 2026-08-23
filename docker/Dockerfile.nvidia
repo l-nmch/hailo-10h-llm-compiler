@@ -1,0 +1,57 @@
+# Full Hailo Dataflow Compiler toolchain on an NVIDIA GPU (CUDA).
+#
+# IMPORTANT — the DFC wheel is NOT redistributable and is NOT part of this
+# repository. Obtain it from the Hailo Developer Zone (free account) and
+# copy it next to this file before building. See README.md in this directory.
+#
+# Build:
+#   cp hailo_dataflow_compiler-*.whl docker/
+#   docker build -f docker/Dockerfile.nvidia -t dfc-nvidia:5.3.0 docker/
+
+FROM ubuntu:22.04
+
+ARG PYTHON_VERSION=3.10
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu124
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- OS packages: Python, build tools, graphviz (DFC emits graph visualizations) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        "python${PYTHON_VERSION}" "python${PYTHON_VERSION}-dev" \
+        python3-pip \
+        build-essential \
+        graphviz graphviz-dev \
+        git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN "python${PYTHON_VERSION}" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# --- Platform PyTorch FIRST, so the DFC dependency resolution below cannot
+# --- replace it with a mismatched build.
+RUN pip install --no-cache-dir torch --index-url "${TORCH_INDEX}"
+
+# --- DFC wheel (bring your own — see header comment) ---
+COPY hailo_dataflow_compiler-*.whl /tmp/
+RUN WHEEL=$(ls /tmp/hailo_dataflow_compiler-*.whl) && \
+    # Install the compiler itself without resolving dependencies: its
+    # requirements include torch/torchvision variants that would clobber the
+    # CUDA build installed above.
+    pip install --no-cache-dir --no-deps "$WHEEL"
+
+# --- DFC runtime dependencies, minus what we pinned above.
+# --- tensordict must also be installed bare (--no-deps): pulling it with
+# --- dependencies upgrades torch again.
+RUN pip install --no-cache-dir \
+        "numpy==2.1.3" \
+        "scipy==1.13.1" \
+        "onnxruntime==1.20.1" \
+        protobuf graphviz tqdm pillow pandas matplotlib \
+        tensorflow-cpu \
+    && pip install --no-cache-dir --no-deps tensordict torchvision
+
+# NumPy >= 2 changed scalar type-promotion; the DFC quantization stage relies
+# on legacy behavior (float64 != float32 checks in create_hw_params()).
+ENV NPY_PROMOTION_STATE=legacy
+
+WORKDIR /workdir
+CMD ["bash"]
