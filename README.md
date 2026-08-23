@@ -108,6 +108,8 @@ flow.
 hailo-10h-llm-compiler/
 ├── docker/          Dockerfiles: NVIDIA CUDA base, AMD ROCm base, Jupyter
 ├── pipeline/        The six compile steps + shared config (s1 → s6)
+├── notebooks/       The same compile chain and the diagnostics tooling,
+│                    as self-contained executable walkthroughs
 ├── runtime/         Device-side tools: hailo-ollama registration,
 │                    generation, and low-level diagnostics
 ├── docs/
@@ -170,6 +172,10 @@ be re-run independently. To compile a different model, edit
 [`pipeline/config.py`](pipeline/config.py) — every architectural constant
 (hidden size, heads, RoPE theta, sequence lengths…) lives there.
 
+> Prefer a single interactive run? [notebooks/walkthrough.ipynb](notebooks/walkthrough.ipynb)
+> executes the same chain end to end, with every step's logic unfolded in
+> cells and validation gates between steps — no scripts required.
+
 ### 3. Deploy to the device and serve
 
 On the host that has the Hailo-10H device (with HailoRT and hailo-ollama
@@ -201,6 +207,8 @@ Three complementary ways, in decreasing order of "how much magic":
 
 | Document | Content |
 |---|---|
+| [notebooks/walkthrough.ipynb](notebooks/walkthrough.ipynb) | The full HF → ONNX → HAR → surgery → quantization → HEF chain as one executable notebook |
+| [notebooks/diagnostics.ipynb](notebooks/diagnostics.ipynb) | Wire-contract reconstruction (mask/RoPE/encodings), offline HEF audit, device probes |
 | [docs/terminology.md](docs/terminology.md) | HAR vs HEF, network scopes, `__prefill`/`__tbt`, KV-cache mechanics, quantization flavors |
 | [docs/device-setup.md](docs/device-setup.md) | PCIe driver, HailoRT, hailo-ollama installation; package sources; memory limits |
 | [docs/status.md](docs/status.md) | Honest, detailed state of every pipeline stage and runtime path |
