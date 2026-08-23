@@ -71,15 +71,20 @@ def build_mask(
 def build_rope(positions, groups: int, theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Cos/sin tables for `positions`, tiled across `groups` heads.
 
-    Returns (cos, sin), each [1, len(positions), groups * head_dim].
+    `theta` is the doubled table (cos-half + sin-half, theta_size = head_dim
+    entries per position); tiling along columns already yields the final
+    `groups * theta_size` width consumed by the HEF inputs (e.g.
+    K = 16 x 8 = 128, Q = 16 x 16 = 256).
+
+    Returns (cos, sin), each [1, len(positions), groups * theta_size].
     """
     positions = np.asarray(list(positions))
     angles = np.outer(positions.astype(np.float64), theta.astype(np.float64))
     cos = np.cos(angles).astype(np.float32)
     sin = np.sin(angles).astype(np.float32)
-    head_dim = theta.shape[0] // 2
-    cos_tiled = np.tile(cos, (1, groups)).reshape(1, len(positions), groups * head_dim)
-    sin_tiled = np.tile(sin, (1, groups)).reshape(1, len(positions), groups * head_dim)
+    theta_size = theta.shape[0]
+    cos_tiled = np.tile(cos, (1, groups)).reshape(1, len(positions), groups * theta_size)
+    sin_tiled = np.tile(sin, (1, groups)).reshape(1, len(positions), groups * theta_size)
     return cos_tiled.astype(np.float32), sin_tiled.astype(np.float32)
 
 
