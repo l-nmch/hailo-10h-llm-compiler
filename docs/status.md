@@ -7,7 +7,9 @@ this before investing time, and update it when you learn something new.
 
 The full compile pipeline works: a Hugging Face checkpoint goes through
 ONNX → HAR → surgery → quantization → HEF, and the resulting self-contained
-HEF loads in genai and hailo-ollama. Prefill inference on hardware is
+HEF loads in genai and hailo-ollama. The same chain executed from
+[notebooks/walkthrough.ipynb](../notebooks/walkthrough.ipynb) produces a HEF
+that behaves identically on hardware. Prefill inference on hardware is
 numerically faithful (cosine ≈ 1.0 against float32). Greedy generation with
 the KV-cache disabled is coherent. **Multi-token generation through the
 KV-cache path produces degraded text** — one open issue remains
@@ -23,6 +25,7 @@ KV-cache path produces degraded text** — one open issue remains
 | Quantization (KV-cache) | ✅ runs (~30 s GPU) | recipe validated by comparison with official `.alls`; no emulator check possible (see below) |
 | Conv repair pass | ✅ kept as safety net | finds 0 issues with the final recipe — its historical cause was ew_add_fusing |
 | HAR → HEF compile | ✅ works (~5–8 min) | both network groups emitted; monolithic lm_head places at optimization_level=0 thanks to the last-position slice |
+| Notebooks ([../notebooks/](../notebooks/)) | ✅ tested headless + on hardware | `walkthrough.ipynb` executes the full chain green (HEF ≈ 44 MiB); its HEF was probed through the raw `InferModel` API: prefill logits cosine 0.998 with exact argmax, tbt degraded identically to pipeline HEFs |
 | genai.LLM load | ✅ works | HEF passes the full runtime contract (six inputs, embedded resources, config keys) |
 | hailo-ollama serving | ✅ registration + serving work | content-addressed blob store + manifest procedure documented |
 | Prefill numerics | ✅ exact | per-position cosines ≈ 1.0 vs float32 reference on hardware |
