@@ -50,8 +50,10 @@ RUN WHEEL=$(ls /tmp/hailo_dataflow_compiler-*.whl) && \
     pip install --no-cache-dir --no-deps "$WHEEL"
 
 # --- Remaining DFC dependencies, again protecting the preinstalled torch.
+# --- matplotlib >= 3.9 required: older releases use np.Inf, removed in
+# --- NumPy 2 (plotting would crash inside notebooks).
 RUN pip install --no-cache-dir \
-        protobuf graphviz tqdm pillow pandas matplotlib tensorflow-cpu \
+        protobuf graphviz tqdm pillow pandas "matplotlib>=3.9" tensorflow-cpu \
     && pip install --no-cache-dir --no-deps tensordict torchvision
 
 # Two environment requirements, both mandatory:

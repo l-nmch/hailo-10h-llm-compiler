@@ -41,11 +41,13 @@ RUN WHEEL=$(ls /tmp/hailo_dataflow_compiler-*.whl) && \
 # --- DFC runtime dependencies, minus what we pinned above.
 # --- tensordict must also be installed bare (--no-deps): pulling it with
 # --- dependencies upgrades torch again.
+# matplotlib >= 3.9 required: older releases use np.Inf, removed in NumPy 2
+# (plotting would crash inside notebooks).
 RUN pip install --no-cache-dir \
         "numpy==2.1.3" \
         "scipy==1.13.1" \
         "onnxruntime==1.20.1" \
-        protobuf graphviz tqdm pillow pandas matplotlib \
+        protobuf graphviz tqdm pillow pandas "matplotlib>=3.9" \
         tensorflow-cpu \
     && pip install --no-cache-dir --no-deps tensordict torchvision
 

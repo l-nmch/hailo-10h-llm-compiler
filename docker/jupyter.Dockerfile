@@ -12,7 +12,10 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-RUN pip install --no-cache-dir jupyter jupyterlab jupyter-resource-usage
+# matplotlib >= 3.9 is required: older versions (e.g. 3.5.x pulled in by some
+# base images) still use np.Inf, removed in NumPy 2 — plotting crashes with
+# "AttributeError: `np.Inf` was removed".
+RUN pip install --no-cache-dir jupyter jupyterlab jupyter-resource-usage "matplotlib>=3.9"
 
 # The DFC images already set NPY_PROMOTION_STATE=legacy; keep it explicit so
 # notebooks cannot silently inherit a different value from the client env.
