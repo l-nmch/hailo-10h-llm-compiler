@@ -18,11 +18,25 @@ bypassing the genai Python wrapper.
 1. `hef_audit.py` — confirm structure and that the embedded config carries
    the right keys (`prefill_input_tokens_count`, not `_size`).
 2. `generate_base_scope.py` — if this is incoherent, the problem is in the
-   compile itself, not the cache mechanism.
+   compile itself, not the cache mechanism. It needs a HEF compiled with
+   `pipeline/s6_compile_hef.py --include-base-scope` (the default HEF has
+   only the two genai network groups — no base scope to drive). That variant
+   is diagnostics-only: never serve it through hailo-ollama / genai.LLM().
 3. `manual_prefill_tbt_test.py` — if base-scope generation is coherent,
    compare prefill vs tbt cosines against a float32 reference to localize
    the divergence. Prefill exact + tbt degraded = cache-read side issue
    ([../../docs/findings/open-tbt-cache-read.md](../../docs/findings/open-tbt-cache-read.md)).
+
+## Where `wte.npy` comes from
+
+`generate_base_scope.py` (and any raw probe) needs the fp32 embedding table
+saved by compile step 1 (`workdir/wte.npy`). The HEF already embeds the
+embeddings — but that copy is there for the *runtime* (hailo-ollama /
+genai.LLM do the token → embedding lookup host-side from
+`embeddings.bin`). A raw probe drives `input_layer1` (`inputs_embeds`)
+directly, so it must redo that lookup itself: token id → `wte[id]` → uint16
+codes with `input_layer1`'s scale/zero-point. The same table also builds the
+calibration set at compile time.
 
 ## Building the reference NPZ
 
