@@ -4,8 +4,8 @@ Compile **your own** small LLM into a Hailo-10H HEF and run it with
 [hailo-ollama](docs/references.md#hailo-software) — end to end, from a
 Hugging Face checkpoint to a self-contained, servable binary.
 
-This repository documents and packages a complete, working methodology for
-using the Hailo Dataflow Compiler (DFC) **LLM compilation flow** — the same
+This repository documents and packages an experimental, reverse-engineered
+methodology for using the Hailo Dataflow Compiler (DFC) **LLM compilation flow** — the same
 flow Hailo uses internally to produce its official generative-AI HEFs — on a
 model of your choice. It was built and validated on
 [Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA](https://huggingface.co/Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA),
@@ -13,13 +13,15 @@ a 25M-parameter LLaMA2-style model with grouped-query attention, small enough
 to iterate quickly yet structurally identical to modern production LLMs
 (RMSNorm, SwiGLU, RoPE, GQA, KV-cache).
 
-> **Status: research preview.** The full compile pipeline works and the
-> resulting HEF runs on hardware. Prefill inference is numerically faithful
-> (cosine ≈ 1.0 vs. the float32 reference). Multi-token generation through
-> the KV-cache path still produces degraded text — one open issue remains,
-> documented in [`docs/findings/open-tbt-cache-read.md`](docs/findings/open-tbt-cache-read.md).
-> Everything needed to reach the current state — and to attack the open
-> issue — is in this repository.
+> ⚠️ **Highly experimental — do not expect it to work.** This project was
+> built by reverse-engineering an undocumented compiler flow against one
+> pinned SDK version (DFC 5.3.0) and one 25M-parameter model. Nothing here is
+> supported, stable, or guaranteed: steps can fail mid-way, APIs move between
+> toolchain versions, and multi-token generation still produces degraded text
+> ([one open issue](docs/findings/open-tbt-cache-read.md)). Read
+> [docs/status.md](docs/status.md) for exactly what works today — and expect
+> to debug everything else yourself. Everything needed to reach the current
+> state is in this repository; getting further is on you.
 
 ---
 
@@ -114,7 +116,6 @@ hailo-10h-llm-compiler/
 │   ├── status.md             What works / what does not, in detail
 │   ├── references.md         Every external link used by this project
 │   └── findings/             The reverse-engineering findings, one page each
-├── wiki/            GitHub-wiki pages (narrative knowledge) — see wiki/PUBLISHING.md
 ├── LICENSE          MIT
 ├── CONTRIBUTING.md
 └── CODE_OF_CONDUCT.md
@@ -205,7 +206,6 @@ Three complementary ways, in decreasing order of "how much magic":
 | [docs/status.md](docs/status.md) | Honest, detailed state of every pipeline stage and runtime path |
 | [docs/references.md](docs/references.md) | All external resources: model zoo entry, hailort source, blog posts, papers |
 | [docs/findings/index.md](docs/findings/index.md) | Index of all reverse-engineering findings (the five compile fixes + SDK behavior + the open issue) |
-| [wiki/](wiki/) | GitHub-wiki pages — system anatomy ([Anatomy of an LLM HEF](wiki/Anatomy-of-an-LLM-HEF.md)), host-side input construction, quantization deep dive, troubleshooting, [investigation chronicle](wiki/Investigation-Chronicle.md); publishing procedure in [wiki/PUBLISHING.md](wiki/PUBLISHING.md) |
 
 ## Current limitations
 
