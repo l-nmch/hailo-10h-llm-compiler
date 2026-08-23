@@ -14,8 +14,17 @@ You need a reference NPZ produced from the float32 model with keys:
     hf_hidden_tbt      fp32 [HIDDEN]         hidden state for the follow-up tbt step
     embed_rows_prompt  fp32 [SEQ, HIDDEN]    embedding rows of the prompt
     embed_row_next     fp32 [HIDDEN]         embedding row of the follow-up token
+Optional (logits-level comparison when no hidden output exists):
+    hf_logits_last     fp32 [VOCAB]          HF last-position logits after prefill
+    hf_logits_tbt      fp32 [VOCAB]          HF logits for the follow-up tbt step
+    next_token_id_tbt  int                   HF greedy token at the tbt step
 Optional (deeper layer comparison):
     conv12_prefill_ref_full / conv12_tbt_ref / conv12 output taps
+
+If the HEF exposes no hidden-state output (self-contained HEFs often expose
+only the lm_head logits), pass ``--hidden-output ""`` and provide
+``hf_logits_last`` / ``hf_logits_tbt`` in the NPZ instead: the comparison
+falls back to cosine + argmax on the logits themselves.
 
 Output vstream names are compile-specific (e.g. conv49 = lm_head logits,
 slice5 = last-position hidden state); pass them explicitly if your HEF
@@ -90,10 +99,21 @@ def main() -> None:
         return name_with_suffix(m.input_names, suffix)
 
     logits_out = name_with_suffix(model_prefill.output_names, args.logits_output)
-    hidden_out = name_with_suffix(model_prefill.output_names, args.hidden_output)
-    extra_out = (
-        name_with_suffix(model_prefill.output_names, args.extra_output) if args.extra_output else None
-    )
+
+    def find_output(names, suffix):
+        matches = [n for n in names if n.endswith(suffix)]
+        return matches[0] if matches else None
+
+    # Hidden-state comparison is optional: HEFs without such an output fall
+    # back to logits-level comparison (needs hf_logits_last/hf_logits_tbt).
+    hidden_out = find_output(model_prefill.output_names, args.hidden_output) if args.hidden_output else None
+    if hidden_out is None:
+        assert "hf_logits_last" in ref, (
+            "no hidden-state output in this HEF and no hf_logits_last in the "
+            "reference -- nothing to compare against"
+        )
+        print(f"[i] no {args.hidden_output!r} output in this HEF -- comparing logits instead")
+    extra_out = find_output(model_prefill.output_names, args.extra_output) if args.extra_output else None
 
     # ============================ PREFILL ============================
     # NOTE the ordering gotcha: update_cache_from_embeddings() runs BEFORE
@@ -118,6 +138,8 @@ def main() -> None:
     out_buffers = {logits_out: np.zeros((1, 1, args.vocab), dtype=np.float32)}
     if extra_out:
         out_buffers[extra_out] = np.zeros((1, args.prefill, args.hidden), dtype=np.float32)
+    if hidden_out:
+        out_buffers[hidden_out] = np.zeros((1, 1, args.hidden), dtype=np.float32)
 
     bindings = configured_prefill.create_bindings(
         input_buffers=in_buffers, output_buffers=out_buffers
@@ -125,12 +147,16 @@ def main() -> None:
     configured_prefill._configured_infer_model.update_cache_offset(args.prefill)
     configured_prefill.run([bindings], 10000)
 
-    hef_hidden_prefill = bindings.output(hidden_out).get_buffer().flatten()
     hef_logits = bindings.output(logits_out).get_buffer().flatten()
     hw_next_token = int(np.argmax(hef_logits))
 
-    sim_prefill = ri.cosine(hef_hidden_prefill, ref["hf_hidden_prefill"])
-    print(f"[prefill] cosine(last-position hidden vs HF): {sim_prefill:.6f}")
+    if hidden_out:
+        hef_hidden_prefill = bindings.output(hidden_out).get_buffer().flatten()
+        sim_prefill = ri.cosine(hef_hidden_prefill, ref["hf_hidden_prefill"])
+        print(f"[prefill] cosine(last-position hidden vs HF): {sim_prefill:.6f}")
+    else:
+        sim_prefill = ri.cosine(hef_logits, ref["hf_logits_last"])
+        print(f"[prefill] cosine(logits vs HF): {sim_prefill:.6f}")
     print(f"[prefill] argmax={hw_next_token} vs HF greedy={int(ref['next_token_id'])}")
     if extra_out and "conv12_prefill_ref_full" in ref:
         tap = bindings.output(extra_out).get_buffer().reshape(args.prefill, args.hidden)
@@ -160,22 +186,33 @@ def main() -> None:
         in_name(model_tbt, "input_layer5"): sint_kt,
         in_name(model_tbt, "input_layer6"): sin_qt,
     }
+    # Output vstream names are group-scoped ("ts25mpipe__tbt/conv49", not
+    # "ts25mpipe__prefill/conv49") -- resolve them against the tbt model.
+    logits_out_t = name_with_suffix(model_tbt.output_names, args.logits_output)
+    hidden_out_t = find_output(model_tbt.output_names, args.hidden_output) if hidden_out else None
     out_buffers_t = {
-        logits_out: np.zeros((1, 1, args.vocab), dtype=np.float32),
+        logits_out_t: np.zeros((1, 1, args.vocab), dtype=np.float32),
     }
+    if hidden_out_t:
+        out_buffers_t[hidden_out_t] = np.zeros((1, 1, args.hidden), dtype=np.float32)
     bindings_t = configured_tbt.create_bindings(
         input_buffers=in_buffers_t, output_buffers=out_buffers_t
     )
     configured_tbt._configured_infer_model.update_cache_offset(1)
     configured_tbt.run([bindings_t], 10000)
 
-    hef_hidden_tbt = bindings_t.output(hidden_out).get_buffer().flatten()
-    hef_logits_t = bindings_t.output(logits_out).get_buffer().flatten()
-    sim_tbt = ri.cosine(hef_hidden_tbt, ref["hf_hidden_tbt"])
-    print(f"[tbt] cosine(last-position hidden vs HF): {sim_tbt:.6f}")
-    print(f"[tbt] argmax={int(np.argmax(hef_logits_t))}")
+    hef_logits_t = bindings_t.output(logits_out_t).get_buffer().flatten()
+    if hidden_out_t:
+        hef_hidden_tbt = bindings_t.output(hidden_out_t).get_buffer().flatten()
+        sim_tbt = ri.cosine(hef_hidden_tbt, ref["hf_hidden_tbt"])
+        print(f"[tbt] cosine(last-position hidden vs HF): {sim_tbt:.6f}")
+    else:
+        sim_tbt = ri.cosine(hef_logits_t, ref["hf_logits_tbt"])
+        print(f"[tbt] cosine(logits vs HF): {sim_tbt:.6f}")
+    print(f"[tbt] argmax={int(np.argmax(hef_logits_t))} vs HF greedy={int(ref['next_token_id_tbt'])}")
     if extra_out and "conv12_tbt_ref" in ref:
-        tap_t = bindings_t.output(extra_out).get_buffer().flatten()
+        extra_out_t = name_with_suffix(model_tbt.output_names, args.extra_output)
+        tap_t = bindings_t.output(extra_out_t).get_buffer().flatten()
         print(f"[tbt] early-layer tap cosine = {ri.cosine(tap_t, ref['conv12_tbt_ref']):.6f}")
 
     print("\ninterpretation:")
