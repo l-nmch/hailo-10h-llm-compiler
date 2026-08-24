@@ -155,7 +155,7 @@ docker build -f docker/Dockerfile.amd -t dfc-amd:5.3.0 docker/
 ### 2. Run the pipeline
 
 ```bash
-git clone https://github.com/<you>/hailo-10h-llm-compiler.git
+git clone https://github.com/l-nmch/hailo-10h-llm-compiler.git
 cd hailo-10h-llm-compiler
 
 docker run --rm -it --gpus all \
