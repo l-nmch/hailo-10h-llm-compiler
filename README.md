@@ -118,6 +118,10 @@ hailo-10h-llm-compiler/
 │   ├── status.md             What works / what does not, in detail
 │   ├── references.md         Every external link used by this project
 │   └── findings/             The reverse-engineering findings, one page each
+├── .claude/skills/  Working playbooks for continuing the investigation
+│                    (writing a finding, preflight checks, device-level
+│                    debugging) — see CLAUDE.md
+├── CLAUDE.md        Ground rules + working patterns for picking this up
 ├── LICENSE          MIT
 ├── CONTRIBUTING.md
 └── CODE_OF_CONDUCT.md
