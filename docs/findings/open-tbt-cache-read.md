@@ -37,6 +37,35 @@ A deterministic, position-independent zeroing pattern points at an
 addressing/layout declaration problem (which slice of the cache each read
 consumes), not at noise, quantization, or flakiness.
 
+## Supporting evidence: token collapse, not context loss
+
+An independent experiment on an earlier version of the pipeline (distilgpt2
+substrate, before the tinystories/RoPE work) generated 1/2/3/4 tokens
+across several prompts and a wide temperature range:
+
+- with only 1 token generated (prefill only), the first token varies by
+  prompt — context-dependent, as expected;
+- from 2 tokens onward (once `__tbt` is exercised), generation always
+  converges to the **same specific token**, regardless of prompt,
+  temperature, or seed.
+
+That total a dominance rules out "context is simply lost and the model
+falls back to a generic distribution" — a lost-context fallback would
+still vary with temperature. It points at a saturation/overflow in the
+`__tbt` compute path rather than a loss of information. Also checked and
+ruled out: the token wasn't some degenerate "default" embedding — its
+embedding norm was unremarkable (within one standard deviation of the
+mean, nowhere near the extremes).
+
+A separate introspection of `genai.LLM`'s undocumented methods
+(`get_context_usage_size()`, `max_context_capacity()`, `save_context()`/
+`load_context()`) found the context-usage counter occasionally jumps by
+more than one and freezes after several correct steps. This is most
+likely cosmetic: token collapse toward the fixed value starts at the very
+first generated token, well before any counter anomaly appears — treat
+the counter jump as a distraction unless a low-level HailoRT trace
+connects it to the cache-read defect directly.
+
 ## Hypotheses eliminated
 
 - **Tokenization/BOS drift** between host and server — was real (see
