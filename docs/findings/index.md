@@ -22,6 +22,7 @@ to a detailed write-up with evidence and reproduction pointers.
 | 7 | Quantization recipe for KV-cache LLMs (ew_add_fusing disabled; no bias_correction/adaround/group_size; optimization_level=0) | validated | [quantization-recipe.md](quantization-recipe.md) |
 | 8 | SDK behaviors: broken quantized emulator on KV-cache graphs, implicit adaround re-enables, Keras registration, paths patch, EINTR interruptions | documented | [sdk-behavior-notes.md](sdk-behavior-notes.md) |
 | 9 | **OPEN** — __tbt cache reads return truncated tensors (~30% structurally zeroed columns) degrading multi-token generation | **open issue** | [open-tbt-cache-read.md](open-tbt-cache-read.md) |
+| 10 | Compiling encoder-only models (BERT/MiniLM-style) — out of main scope, validated side-path | done, scope note | [encoder-model-keras-registration.md](encoder-model-keras-registration.md) |
 
 ## How to read these
 
