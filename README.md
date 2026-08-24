@@ -93,7 +93,7 @@ obtain them from Hailo's developer portal yourself.
  register_hailo_ollama.py   Publish into hailo-ollama's model store
         │
         ▼
- hailo-ollama serve / hailo-ollama run <family>:<tag>
+ hailo-ollama                          # starts the server; call its REST API to generate
 ```
 
 The model graph itself is duplicated by the compiler into two network
@@ -188,7 +188,12 @@ installed — [docs/device-setup.md](docs/device-setup.md)):
 ```bash
 python runtime/register_hailo_ollama.py --hef workdir/model.hef \
     --family tinystories25m --tag my-first-model
-hailo-ollama run tinystories25m:my-first-model
+hailo-ollama   # starts serving; manifests are (re-)scanned at startup
+
+# then call its Ollama-compatible REST API, e.g. to pull/select the model:
+curl --silent http://localhost:8000/api/pull \
+    -H 'Content-Type: application/json' \
+    -d '{"model": "tinystories25m:my-first-model", "stream": true}'
 ```
 
 ## Running the compiled model

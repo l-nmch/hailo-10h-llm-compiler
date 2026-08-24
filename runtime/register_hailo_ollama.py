@@ -10,12 +10,12 @@ hailo-ollama discovers models through two locations:
    the blob hash plus display metadata.
 
 This script copies the HEF into the blob store and writes the manifest,
-after which the model behaves exactly like an official one:
+after which the model behaves exactly like an official one: start (or
+restart) the server with ``hailo-ollama`` and generate through its REST
+API using ``<family>:<tag>`` as the model name.
 
-    hailo-ollama run <family>:<tag>
-
-Note: the server only scans manifests at startup, so restart
-(`hailo-ollama serve`) after registering.
+Note: the server only scans manifests at startup, so restart it after
+registering.
 
 Run on the device host (the machine with the Hailo-10H and hailo-ollama
 installed). See ../docs/device-setup.md for installing that stack.

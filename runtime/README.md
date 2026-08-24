@@ -17,8 +17,12 @@ installed, HailoRT user-space libraries and (optionally) hailo-ollama. See
 python register_hailo_ollama.py --hef workdir/model.hef \
     --family tinystories25m --tag my-model
 
-# 2a. serve it like an official model
-hailo-ollama run tinystories25m:my-model
+# 2a. serve it like an official model (manifests are scanned at startup)
+hailo-ollama
+# then call its Ollama-compatible REST API, e.g. to pull/select the model:
+curl --silent http://localhost:8000/api/pull \
+    -H 'Content-Type: application/json' \
+    -d '{"model": "tinystories25m:my-model", "stream": true}'
 
 # 2b. or exercise the genai API directly
 python genai_generate.py --hef workdir/model.hef --prompt "Once upon a time"
