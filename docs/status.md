@@ -58,6 +58,15 @@ the open finding):
 3. Try `cache_size` / `prefill_size` combinations other than the
    SEQ==CACHE_SIZE assumption.
 4. Reproduce on a second Hailo-10H unit to rule out the specific device.
+5. Run DFC's **Layer Noise Analysis** checker
+   (`model_optimization_config(checker_cfg, layer_noise_analysis, ...)`,
+   or the algorithm's own name inside the SDK) during step 4. It's a
+   read-only diagnostic — it infers the model both native and quantized
+   and reports per-layer SNR, without altering the resulting `.Q.HAR` —
+   never run on this project so far. It would tell us whether any layer
+   is a disproportionate noise contributor, useful context for the
+   cache-read investigation and for any future per-layer precision
+   decision.
 
 ## Provenance note
 

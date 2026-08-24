@@ -46,6 +46,66 @@ quantization_param([<conv list>], precision_mode=a8_w4)
 - **Conv selection**: exclude near-empty kernels (sparsity > 0.9) and
   ultra-narrow convs (min input width ≤ head_dim) from INT4.
 
+## This recipe is not Hailo's actual production recipe — and that's measurable
+
+Everything above is generic DFC accuracy tooling (bias_correction,
+adaround) that happens to work reasonably well through robustness, not
+because it's the LLM-specific method. Hailo's own public engineering blog
+post on bringing generative AI to the Hailo-10H states their production
+LLM quantization uses **QuaROT** (a Hadamard-transform outlier mitigation
+technique on weight matrices) fused with **GPTQ** (second-order-aware
+one-shot post-training quantization) as dedicated stages of the Dataflow
+Compiler's optimization flow — techniques never applied in this project.
+Their own published benchmark on a production 1.5B chat model shows
+near-zero accuracy loss end to end at 4-bit, in a different regime than
+anything measured here. A `use_prequantized_weights` directive exists in
+the SDK, accepting weights already quantized by an external tool
+(stored as `value × scale`) before DFC sees them — a plausible mechanism
+for where GPTQ actually happens, upstream of DFC entirely, and untested
+in this project.
+
+### Isolated ablation: what each accuracy stage actually buys (cosine vs HF, single batched `infer()`)
+
+| Configuration | cosine(HF, ·) |
+|---|---|
+| HAR fp32 (no quantization) | 0.938 |
+| INT4 + `bias_correction` only | **0.960** (better than native fp32) |
+| INT4 + `bias_correction` + `adaround` | 0.953 |
+| INT4 + `bias_correction` + `finetune` (QAT) together | **-0.72 — catastrophic**, output is pure noise |
+
+`finetune` combined with `bias_correction` is confirmed to break the model
+outright — never combine them. `adaround` alone is a slight net negative
+versus `bias_correction` alone here, consistent with the recipe above
+dropping both in favor of neither.
+
+### The `adaround` crash: two diagnoses, only the second one was right
+
+An earlier `bias_correction`+`adaround` run crashed with a
+`FileNotFoundError` on a cache file at block 48/49. First hypothesis —
+premature cache eviction inside the SDK's cache-cleanup logic — was
+**tested and refuted**: patching cache-cleanup to never evict produced
+the identical crash at the identical block, disproving the theory.
+
+Real cause: `bias_correction_count` (an SDK config field, default value
+**64**) is independent from `calibset_size` (set to 32 here) and was never
+synced — `adaround` tried to re-read up to 64 cached calibration samples
+when only 32 had ever been written. Fix is one config line:
+`bias_correction_count=<your calibset_size>` on the `adaround` directive.
+No SDK patch needed. **Method lesson**: a plausible mechanism read
+straight from SDK source is still a hypothesis until tested — this one
+looked completely coherent and was still wrong.
+
+## Unexploited: Layer Noise Analysis
+
+DFC ships a `Layer Noise Analysis` checker (source class `HailoQuantAnalyzer`)
+that infers the model both natively and quantized and reports per-layer SNR.
+It's read-only diagnostics — confirmed from the algorithm's own source: it
+computes statistics into a work directory and does not write back into the
+model, so enabling it cannot change the resulting `.Q.HAR`. Never run on
+this project; see [docs/status.md](../status.md) "What would move the
+needle next" for why it's worth doing before the next round on the
+cache-read issue.
+
 ## What could NOT be verified locally
 
 Nothing downstream of step 4 can be checked in software: the quantized
