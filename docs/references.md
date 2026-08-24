@@ -30,15 +30,28 @@ Every external resource this project relied on or learned from.
   sources document which `hailo-config.json` keys are actually read.
 - [hailo-ai/meta-hailo](https://github.com/hailo-ai/meta-hailo) — Yocto
   layers; a second distribution channel for driver + HailoRT.
+- [hailo-ai/hailort-drivers](https://github.com/hailo-ai/hailort-drivers) —
+  public source of the `hailo_pci` kernel driver (GPL-2.0); the device
+  firmware is built together with it.
+- [hailo-ai/hailo_model_zoo_genai](https://github.com/hailo-ai/hailo_model_zoo_genai)
+  — MIT-licensed public source of **hailo-ollama** (the Ollama-compatible
+  REST server used for first-contact serving tests in this repo), plus the
+  official HEF download manifests.
+- [hailo-ai/hailo-apps](https://github.com/hailo-ai/hailo-apps) —
+  MIT-licensed Hailo applications; its LICENSE covers genai runtime
+  components alongside the hailo_model_zoo_genai one.
 - [hailo-ai/hailo_model_zoo](https://github.com/hailo-ai/hailo_model_zoo)
   — MIT-licensed model zoo (mostly vision; useful as DFC usage reference).
 - [hailo-ai/tappas](https://github.com/hailo-ai/tappas) — Hailo application
   post-processing library (LGPL-2.1); context for the ecosystem.
 
 License breakdown of the above: HailoRT core is MIT, its GStreamer plugin
-is LGPL-2.1, the kernel driver is GPL-2.0, meta-hailo is MIT; the Dataflow
-Compiler wheel, the device firmware and hailo-ollama are proprietary — none
-of those are redistributed by this repository.
+is LGPL-2.1, the kernel driver is GPL-2.0, meta-hailo is MIT, and the
+hailo-ollama / genai-runtime sources are published under MIT licenses
+([hailo_model_zoo_genai](https://github.com/hailo-ai/hailo_model_zoo_genai/blob/main/LICENSE),
+[hailo-apps](https://github.com/hailo-ai/hailo-apps/blob/main/LICENSE));
+the Dataflow Compiler wheel and the device firmware remain proprietary —
+neither of those is redistributed by this repository.
 
 ## Tooling used by the Docker images
 

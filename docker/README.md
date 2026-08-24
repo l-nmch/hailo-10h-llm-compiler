@@ -42,6 +42,9 @@ in their build context and fail with a clear message if it is missing.
 
 ### NVIDIA (CUDA)
 
+Any Turing (sm_75) or newer GPU works. The GPU is optional — it only
+accelerates the quantization step; CPU-only is slower but functional.
+
 ```bash
 cp hailo_dataflow_compiler-*.whl docker/
 docker build -f docker/Dockerfile.nvidia -t dfc-nvidia:5.3.0 docker/
@@ -53,8 +56,10 @@ The AMD image builds on a community ROCm PyTorch base image so that the
 DFC's optimization engine can run on AMD GPUs (the stock DFC optimizer is
 TensorFlow/CUDA-oriented; this project switches it to the PyTorch engine —
 see [../docs/findings/sdk-behavior-notes.md](../docs/findings/sdk-behavior-notes.md)).
-Tested against `mixa3607/pytorch-gfx906:v2.11.0-rocm-7.2.1`; any ROCm
+Tested against `mixa3607/pytorch-gfx906:v2.11.0-rocm-7.2.1` on a gfx906
+GPU — nothing older was verified; any ROCm
 PyTorch base close to your kernel/GPU should work the same way.
+As on NVIDIA, the GPU is optional (quantization speed-up only).
 
 ```bash
 cp hailo_dataflow_compiler-*.whl docker/

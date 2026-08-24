@@ -131,7 +131,7 @@ hailo-10h-llm-compiler/
 |---|---|
 | Hailo-10H device | PCIe M.2 card or SoM, with working drivers (see [docs/device-setup.md](docs/device-setup.md)) |
 | Hailo Dataflow Compiler 5.3.0 | Proprietary, free account required — see [docker/README.md](docker/README.md) |
-| NVIDIA GPU (CUDA) **or** AMD GPU (ROCm) | For the quantization step; CPU-only works but is very slow |
+| NVIDIA GPU (CUDA) **or** AMD GPU (ROCm) — **optional** | Speeds up the quantization step only (CPU-only works but is much slower). NVIDIA: Turing (sm_75) or newer. AMD: gfx906 is what we tested — nothing older verified |
 | Docker | All tooling runs in containers; nothing is installed on the host |
 | ~30 GB disk | DFC image ≈ 15 GB, working directory for artifacts |
 

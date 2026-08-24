@@ -17,11 +17,11 @@ host.
 
 | Component | License | Source |
 |---|---|---|
-| `hailo_pci` kernel driver | GPL-2.0 | Software Suite (`hailort-drivers`) or [meta-hailo](https://github.com/hailo-ai/meta-hailo) |
+| `hailo_pci` kernel driver | GPL-2.0 | Software Suite (`hailort-drivers`) or [meta-hailo](https://github.com/hailo-ai/meta-hailo); public source at [hailo-ai/hailort-drivers](https://github.com/hailo-ai/hailort-drivers) |
 | HailoRT (libraries + `hailortcli`) | MIT (core) | Software Suite, or build from [hailo-ai/hailort](https://github.com/hailo-ai/hailort) (public source) |
-| Firmware (flashed on device) | proprietary | shipped with the suite; loaded by the driver |
-| genai LLM runtime (`hailo_platform.genai`, C++ server) | proprietary | ships inside the suite's HailoRT package for LLM-capable parts |
-| hailo-ollama | proprietary | ships with the software suite for the Hailo-10H; no public repository |
+| Firmware (flashed on device) | proprietary | shipped with the suite; loaded by the driver — built together with the `hailo_pci` driver from [hailo-ai/hailort-drivers](https://github.com/hailo-ai/hailort-drivers) & [hailo-ai/hailort](https://github.com/hailo-ai/hailort) |
+| genai LLM runtime (`hailo_platform.genai`, C++ server) | MIT — [hailo_model_zoo_genai LICENSE](https://github.com/hailo-ai/hailo_model_zoo_genai/blob/main/LICENSE) & [hailo-apps LICENSE](https://github.com/hailo-ai/hailo-apps/blob/main/LICENSE) | ships inside the suite's HailoRT package for LLM-capable parts |
+| hailo-ollama | MIT — [hailo_model_zoo_genai LICENSE](https://github.com/hailo-ai/hailo_model_zoo_genai/blob/main/LICENSE) | public source: [hailo-ai/hailo_model_zoo_genai](https://github.com/hailo-ai/hailo_model_zoo_genai); also shipped as a binary with the software suite for the Hailo-10H |
 
 Version pinning used to validate everything in this repo:
 
