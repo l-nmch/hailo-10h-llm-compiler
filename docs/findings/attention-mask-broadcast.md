@@ -29,6 +29,13 @@ EWAdd"` — so neither parser-side option produces a correct broadcast here.
 Semantic mismatch between the broadcast mechanism available in-graph and the
 one required by the mask layout.
 
+A second symptom of the same broadcast-semantics problem was also seen on
+an element-wise **multiply** (softmax normalization), not just the
+element-wise add covered above: `InvalidInputShape: Input shapes
+[[None, 256, 256, 3072], (None, 256, 256, 1)] doesn't match each other in
+.../ew_mult2_softmax1`. Same root cause (repeat-vs-tile mismatch feeding
+an op that expects matching shapes), different consuming op.
+
 ## Fix
 
 Eliminate the need to broadcast inside the graph. The runtime already

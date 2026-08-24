@@ -23,6 +23,12 @@ Hardware is the only judge. Plan iteration cycles accordingly.
 Setting a non-zero optimization level implicitly enables adaround,
 bias_correction and finetune. If your recipe deliberately excludes them,
 you must pin `optimization_level=0` or they come back without warning.
+On at least one graph shape this isn't just a silent behavior change but a
+hard crash: `AccelerasInitializationError: Activation fitting was enabled
+but there is no histogram on ActivationType.INV_POS in
+.../reduce_sum1/act_op` — activation fitting on a softmax's `reduce_sum`
+failed outright for lack of a histogram. Another reason `optimization_level=0`
+is load-bearing here, not just a preference.
 
 ## Keras deserialization needs the acceleras registration preamble
 
@@ -118,10 +124,13 @@ multi-context partitioner find a working split where it previously
 couldn't. If you hit this exact error, stop tuning compiler flags and
 check whether a base-scope group is present in your compile.
 
-**Untested lever**: `llm_modifications` — a model-script directive
-referenced in official recipes but never otherwise documented in this
-project — is policy-gated (off by default) rather than chip-gated. One of
-its sub-passes, `_handle_tiling_conv`, is designed to detect the
+**Partially-tested lever**: `llm_modifications` — a model-script directive
+referenced in official recipes — is policy-gated (off by default) rather
+than chip-gated. It was enabled once (`policy=enabled, conv_splits=1`) and
+successfully quantized to a `.q.har`, but the resulting HEF compile
+outcome was never captured (no compile log survives) — the lever is
+tested at the quantization stage only, not proven end-to-end. One of its
+sub-passes, `_handle_tiling_conv`, is designed to detect the
 GQA-repeat-via-matmul pattern (a conv whose kernel is concatenated
 identity matrices) and rewrite it as a native `input_tiles` parameter on
 the matmul instead of a real conv — which could reduce the memory
