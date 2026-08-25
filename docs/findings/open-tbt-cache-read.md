@@ -1,8 +1,17 @@
 # Finding 9 — OPEN: `__tbt` cache reads return truncated tensors
 
-**Status: OPEN — the single remaining blocker.** Everything else in this
-repository is validated. This page records the full evidence chain so the
-next person starts where we stopped.
+**Status: OPEN.** This page records the full evidence chain so the next
+person starts where we stopped. **See
+[sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) first** — a
+shared-across-heads softmax bug was just found and confirmed bit-exact,
+present on every checkpoint tested including the base-scope-only
+`SDK_NATIVE` path. It hasn't been directly tested against the `__tbt`
+symptoms below yet, but "real words, wrong order/weighting" is exactly
+the failure mode that bug would produce, and it would explain why no
+control experiment below (which all operate above the softmax layer, or
+assume the mask/attention math is correct) ever isolated a cache-specific
+mechanism. Worth re-testing the evidence below through that lens before
+spending more time on cache-addressing theories specifically.
 
 ## Symptom
 
