@@ -36,6 +36,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
+    if config.COSINE_MIN < 0.999:
+        print(f"!! COSINE_MIN overridden to {config.COSINE_MIN} (validated default: 0.999) !!")
     P = config.paths()
 
     refs = np.load(P.hf_refs)
@@ -88,7 +91,7 @@ def main() -> None:
     native_logits = np.array(out[0] if isinstance(out, list) else out).reshape(1, 1, -1)
     sim = config.cosine(hf_logits_last, native_logits)
     print(f"cosine(HF last position, HAR/SDK_NATIVE, pre-surgery): {sim:.6f}")
-    assert sim > 0.999, "native HAR diverged from HF"
+    assert sim > config.COSINE_MIN, "native HAR diverged from HF"
     print("[OK] step 2 complete")
 
 
