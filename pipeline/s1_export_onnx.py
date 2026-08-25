@@ -23,10 +23,13 @@ Two graph-level fixes are inseparable here:
   256x32000 matmul placeable on-chip ("Agent infeasible" otherwise).
 
 Usage:
-    python s1_export_onnx.py            # uses $DFC_WORKDIR (default ./workdir)
+    python s1_export_onnx.py                       # validated TinyStories default
+    python s1_export_onnx.py --model <hf-id>        # any eligible checkpoint
+        [--seq N] [--prefill-size N] [--calibset-size N] [--net-scope NAME]
 """
 import argparse
 import math
+from types import SimpleNamespace
 
 import config  # must precede numpy imports — sets NPY_PROMOTION_STATE et al.
 
@@ -73,11 +76,17 @@ def make_repeat_kv_matrix(hd: int, n_kv_heads: int, n_rep: int) -> torch.Tensor:
     return m
 
 
-ROTATE_HALF_Q = make_rotate_half_matrix(config.HD, config.NHEAD)
-ROTATE_HALF_K = make_rotate_half_matrix(config.HD, config.NKVHEAD)
-TILE_Q = make_tile_matrix(config.HD, config.NHEAD)
-TILE_K = make_tile_matrix(config.HD, config.NKVHEAD)
-REPEAT_KV_MATRIX = make_repeat_kv_matrix(config.HD, config.NKVHEAD, config.NREP)
+def build_matmul_trick_matrices():
+    """Build the five RoPE/tiling/GQA constant matrices for the CURRENT
+    config (config.HD/NHEAD/NKVHEAD/NREP). Must run after config.load() —
+    these depend on the checkpoint's architecture, not just its size."""
+    return SimpleNamespace(
+        rotate_half_q=make_rotate_half_matrix(config.HD, config.NHEAD),
+        rotate_half_k=make_rotate_half_matrix(config.HD, config.NKVHEAD),
+        tile_q=make_tile_matrix(config.HD, config.NHEAD),
+        tile_k=make_tile_matrix(config.HD, config.NKVHEAD),
+        repeat_kv=make_repeat_kv_matrix(config.HD, config.NKVHEAD, config.NREP),
+    )
 
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = config.RMS_EPS) -> torch.Tensor:
@@ -89,8 +98,9 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = config.RMS_EPS)
 class GQALayer(torch.nn.Module):
     """One transformer layer using only export-friendly ops."""
 
-    def __init__(self, layer):
+    def __init__(self, layer, matrices: SimpleNamespace):
         super().__init__()
+        self.m = matrices
         # Weights stored transposed (in_features, out_features) so forward
         # passes are plain `x @ W` matmuls.
         self.Wq = torch.nn.Parameter(layer.self_attn.q_proj.weight.detach().T.clone())
@@ -111,10 +121,10 @@ class GQALayer(torch.nn.Module):
         q = h @ self.Wq
         k = h @ self.Wk
         v = h @ self.Wv
-        q = q * q_cos_t + (q @ ROTATE_HALF_Q) * q_sin_t
-        k = k * k_cos_t + (k @ ROTATE_HALF_K) * k_sin_t
-        k = k @ REPEAT_KV_MATRIX  # GQA: expand KV heads to Q heads
-        v = v @ REPEAT_KV_MATRIX
+        q = q * q_cos_t + (q @ self.m.rotate_half_q) * q_sin_t
+        k = k * k_cos_t + (k @ self.m.rotate_half_k) * k_sin_t
+        k = k @ self.m.repeat_kv  # GQA: expand KV heads to Q heads
+        v = v @ self.m.repeat_kv
 
         q = q.view(b, s, config.NHEAD, config.HD).transpose(1, 2)
         k = k.view(b, s, config.NHEAD, config.HD).transpose(1, 2)
@@ -140,10 +150,11 @@ class GQALayer(torch.nn.Module):
 class ExportableModelWithHead(torch.nn.Module):
     """Full model ending in lm_head over the last position only."""
 
-    def __init__(self, hf_model):
+    def __init__(self, hf_model, matrices: SimpleNamespace):
         super().__init__()
+        self.m = matrices
         self.layers = torch.nn.ModuleList(
-            [GQALayer(hf_model.model.layers[i]) for i in range(config.NLAYERS)]
+            [GQALayer(hf_model.model.layers[i], matrices) for i in range(config.NLAYERS)]
         )
         self.norm_w = torch.nn.Parameter(hf_model.model.norm.weight.detach().clone())
         # Separate weight matrix — this model does NOT tie embeddings
@@ -152,10 +163,10 @@ class ExportableModelWithHead(torch.nn.Module):
 
     def forward(self, token_embeds, attention_mask_tiled, pe_k_cos, pe_q_cos, pe_k_sin, pe_q_sin):
         x = token_embeds
-        k_cos_t = pe_k_cos @ TILE_K
-        q_cos_t = pe_q_cos @ TILE_Q
-        k_sin_t = pe_k_sin @ TILE_K
-        q_sin_t = pe_q_sin @ TILE_Q
+        k_cos_t = pe_k_cos @ self.m.tile_k
+        q_cos_t = pe_q_cos @ self.m.tile_q
+        k_sin_t = pe_k_sin @ self.m.tile_k
+        q_sin_t = pe_q_sin @ self.m.tile_q
         for layer in self.layers:
             x = layer(x, attention_mask_tiled, k_cos_t, q_cos_t, k_sin_t, q_sin_t)
         x = x.reshape(x.shape[0], x.shape[1], config.HIDDEN)
@@ -167,14 +178,55 @@ class ExportableModelWithHead(torch.nn.Module):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--workdir", default=None, help="override $DFC_WORKDIR")
+    parser.add_argument("--model", default=None,
+                        help="HF checkpoint id (default: the validated "
+                             "TinyStories checkpoint). Must be untied-embedding, "
+                             "RMSNorm+RoPE+SwiGLU+GQA-or-MHA — see "
+                             "Porting-Another-Model.md's eligibility screen.")
+    parser.add_argument("--seq", type=int, default=None,
+                        help="sequence/KV-cache length (default: 24)")
+    parser.add_argument("--prefill-size", type=int, default=None,
+                        help="prefill scope length (default: 16)")
+    parser.add_argument("--calibset-size", type=int, default=None,
+                        help="quantization calibration samples (default: 32)")
+    parser.add_argument("--net-scope", default=None,
+                        help="HEF network-group base name (default: derived "
+                             "from --model)")
+    parser.add_argument("--cosine-min", type=float, default=None,
+                        help="fidelity gate for steps 1-3 (default: 0.999, "
+                             "the bar this pipeline was validated against on "
+                             "a 4-layer model). Lower this ONLY after "
+                             "confirming a drop is benign drift, not a real "
+                             "bug — see config.py's COSINE_MIN docstring.")
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    # Step 1 always resolves a full config (even with no flags at all) so
+    # run_config.json exists for steps 2-6 to pick up — bare `config.load()`
+    # only reads an *existing* run_config.json, it never re-derives.
+    config.load(
+        args.model or config.MODEL_ID, seq=args.seq, prefill_size=args.prefill_size,
+        calibset_size=args.calibset_size, net_scope=args.net_scope,
+        cosine_min=args.cosine_min,
+    )
+    if config.COSINE_MIN < 0.999:
+        print(f"!! COSINE_MIN overridden to {config.COSINE_MIN} (validated default: 0.999) "
+              "!! — every fidelity gate in steps 1-3 uses this relaxed bar for this run.")
     P = config.paths()
     P.workdir.mkdir(parents=True, exist_ok=True)
+    matrices = build_matmul_trick_matrices()
 
     print(f"==> loading {config.MODEL_ID}")
-    hf_model = AutoModelForCausalLM.from_pretrained(config.MODEL_ID, torch_dtype=torch.float32).eval()
+    # attn_implementation="eager" makes HF's own forward pass use plain
+    # matmul+softmax+matmul attention, matching our reimplementation's math
+    # exactly instead of a fused SDPA kernel that may accumulate differently
+    # — kept for a deterministic, apples-to-apples reference even though it
+    # did NOT explain the large-model cosine gap tested in
+    # docs/findings/sdk-native-cosine-drift.md (ruled out there, on CPU SDPA
+    # falls back to the same math as eager anyway).
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        config.MODEL_ID, torch_dtype=torch.float32, attn_implementation="eager",
+    ).eval()
     tokenizer = AutoTokenizer.from_pretrained(config.MODEL_ID)
     wte = hf_model.model.embed_tokens.weight.detach().numpy().astype(np.float32)
     assert wte.shape == (config.VOCAB, config.HIDDEN)
@@ -201,7 +253,7 @@ def main() -> None:
     tokenizer.save_pretrained(P.tokenizer_dir)
 
     print("==> building exportable reimplementation (lm_head + last-position slice)")
-    wrapped = ExportableModelWithHead(hf_model).eval()
+    wrapped = ExportableModelWithHead(hf_model, matrices).eval()
 
     theta = config.head_dim_frequencies()
     positions = np.arange(config.SEQ)
@@ -216,7 +268,7 @@ def main() -> None:
         ).numpy()  # (1, 1, VOCAB)
     sim = config.cosine(hf_logits_full[:, -1:, :], logits_wrapped)
     print(f"cosine(HF last position, PyTorch reimplementation): {sim:.6f}")
-    assert sim > 0.999, "reimplementation diverged from HF"
+    assert sim > config.COSINE_MIN, "reimplementation diverged from HF"
 
     print("==> exporting ONNX + validating with onnxruntime")
     torch.onnx.export(
@@ -241,7 +293,7 @@ def main() -> None:
     onnx_logits = sess.run(["logits"], onnx_inputs)[0]
     sim_onnx = config.cosine(hf_logits_full[:, -1:, :], onnx_logits)
     print(f"cosine(HF last position, ONNX/onnxruntime): {sim_onnx:.6f}")
-    assert sim_onnx > 0.999, "ONNX export diverged from HF"
+    assert sim_onnx > config.COSINE_MIN, "ONNX export diverged from HF"
 
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     np.savez(
