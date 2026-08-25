@@ -157,8 +157,9 @@ class ExportableModelWithHead(torch.nn.Module):
             [GQALayer(hf_model.model.layers[i], matrices) for i in range(config.NLAYERS)]
         )
         self.norm_w = torch.nn.Parameter(hf_model.model.norm.weight.detach().clone())
-        # Separate weight matrix — this model does NOT tie embeddings
-        # (`tie_word_embeddings=False`, verified on the checkpoint).
+        # Baked in as its own independent tensor either way — tied or not,
+        # `lm_head.weight` already holds the right values, and DFC's graph
+        # has no notion of two ops sharing one weight tensor regardless.
         self.Wlm = torch.nn.Parameter(hf_model.lm_head.weight.detach().T.clone())  # (HIDDEN, VOCAB)
 
     def forward(self, token_embeds, attention_mask_tiled, pe_k_cos, pe_q_cos, pe_k_sin, pe_q_sin):
@@ -230,9 +231,6 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(config.MODEL_ID)
     wte = hf_model.model.embed_tokens.weight.detach().numpy().astype(np.float32)
     assert wte.shape == (config.VOCAB, config.HIDDEN)
-    assert not (hf_model.lm_head.weight is hf_model.model.embed_tokens.weight), (
-        "unexpected tied word embeddings — this pipeline requires tie_word_embeddings=False"
-    )
 
     # A prompt of EXACTLY SEQ real tokens (no padding): since the graph slices
     # at the last position before lm_head, comparing against a padded position

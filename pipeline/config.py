@@ -144,15 +144,17 @@ def load(
             f"warning: {type(hf_config).__name__} is not in the known-eligible "
             "architecture family (Llama/Mistral/Qwen2-style). This pipeline may "
             "still work if the model uses RMSNorm + RoPE + SwiGLU MLP + "
-            "GQA-or-MHA attention with untied embeddings — see "
-            "Porting-Another-Model.md's eligibility screen. Steps 1/2 will "
+            "GQA-or-MHA attention — see Porting-Another-Model.md's "
+            "eligibility screen. Steps 1/2 will "
             "fail loudly if the architecture doesn't fit."
         )
-    assert getattr(hf_config, "tie_word_embeddings", False) is False, (
-        f"{model_id} ties its embeddings (tie_word_embeddings=True) — this "
-        "pipeline requires untied embeddings (see the eligibility screen in "
-        "Porting-Another-Model.md)."
-    )
+    if getattr(hf_config, "tie_word_embeddings", False):
+        print(
+            f"note: {model_id} ties its embeddings (tie_word_embeddings=True) — "
+            "step 1 exports the embedding table and the lm_head matrix as two "
+            "independent baked-in tensors either way, so this is not a blocker "
+            "by itself."
+        )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     bos_id = tokenizer.bos_token_id
