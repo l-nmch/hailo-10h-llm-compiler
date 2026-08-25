@@ -1,14 +1,25 @@
-# Finding 11 — ROOT CAUSE FOUND: DFC's softmax normalizes across heads instead of per-head
+# Finding 11 — ROOT CAUSE FOUND: DFC's `SoftmaxOp.call_hw_sim()` ignores its own `groups` parameter
 
-**Status: root cause confirmed bit-exact (cosine 0.9999999999996048) in
-`SDK_NATIVE`.** What started as an unexplained cosine-drift correlation
-with model scale turned out to be one specific, reproducible bug: DFC's
-compiled softmax for this project's head-tiled causal-mask scheme reduces
-over the entire `NHEAD*SEQ` axis as a single softmax instead of `NHEAD`
-independent per-head softmaxes — see "Root cause confirmed" below for the
-proof. Still open: whether the compiled/quantized HEF (not just the
-`SDK_NATIVE` float32 simulation measured here) shares the same mechanism,
-and exactly where in the graph the per-head boundary is lost.
+**Status: root cause confirmed at the exact source line, bit-exact
+(cosine 0.9999999999996048) in `SDK_NATIVE`.** DFC's HN correctly declares
+`groups=NHEAD` on every attention softmax layer (verified: `groups=24` for
+Felladrin, `groups=16` for TinyStories, both matching `NHEAD` exactly) —
+the compiler's own graph metadata is right. But the numeric emulation code
+that actually runs for every inference context in this SDK
+(`hailo_model_optimization/acceleras/atomic_ops/softmax_op.py`,
+`SoftmaxOp.call_hw_sim()`) computes a single `tf.reduce_max`/`tf.reduce_sum`
+over the *entire* input axis, with no reference to `self._groups` anywhere
+in the method. A sibling method on the same class, `call_native()`,
+*does* implement the grouped softmax correctly (loops `self._groups`
+times, slicing `inp.shape[3] // self._groups`-wide chunks) — but
+`BaseAtomicOp._numeric_run()`, the dispatcher used by every inference
+context this project has tried (`SDK_NATIVE`, `SDK_BIT_EXACT`; its own
+docstring says the numeric-run path is "hardware like — main emulation"),
+unconditionally calls `call_hw_sim()`, never `call_native()`. The grouped
+implementation exists in the same file and is simply never invoked by the
+path that matters. Given the "hardware like" framing in the SDK's own
+docstring, this plausibly also describes actual silicon behavior, not
+just an emulator quirk — unconfirmed, see "Next step" below.
 
 ## Symptom
 
@@ -397,23 +408,69 @@ the mask/softmax wiring design present since the project's inception,
 never caught because the only fidelity check ever applied was final-logits
 cosine.
 
+## Exact source location and code
+
+`hailo_model_optimization/acceleras/atomic_ops/softmax_op.py`, class
+`SoftmaxOp` (proprietary SDK source — paraphrased structure, not
+reproduced verbatim per this repo's proprietary-material policy):
+
+- `call_native(self, inputs, **kwargs)`: correctly grouped. Computes
+  `input_group_size = inp.shape[3] // self._groups`, loops
+  `for g in range(self._groups)`, slices
+  `inp[:, :, :, g*input_group_size:(g+1)*input_group_size]`, applies
+  `tf.nn.softmax` independently per slice, concatenates the results.
+  This is the mathematically correct per-head implementation, and it
+  exists in the SDK today.
+- `call_hw_sim(self, inputs, **kwargs)`: **not grouped**. Computes
+  `tf.reduce_max`/`tf.math.exp`/`tf.reduce_sum` over the full input
+  tensor along `self._axis`, with no reference to `self._groups`
+  anywhere in the method body.
+- `BaseAtomicOp._numeric_run()` (the shared dispatcher every atomic op
+  inherits) unconditionally calls `self.call_hw_sim(...)` — never
+  `call_native()`. Its own docstring: *"The numeric run results not
+  hardware bit exact, but it's `hardware like` and the main emulation."*
+  This is the path `SDK_NATIVE` and `SDK_BIT_EXACT` both take (confirmed
+  via stack traces earlier in this document: `_bit_exact_run ->
+  call_bit_exact -> call_hw_sim`, and the equivalent for `_numeric_run`
+  during `SDK_NATIVE`).
+
+So the grouped implementation is not missing from the SDK — it's dead
+code from this project's perspective, because the only method that's
+actually invoked ignores grouping entirely. The HN's `groups=NHEAD`
+metadata is correctly produced by this pipeline's export/parse/surgery
+steps and correctly stored on the layer object; it's simply never read
+by the code path that computes the numbers.
+
 ## Next step (not yet done)
 
-This is now a masking/graph-construction question, not a numerics
-question. Locate exactly where in this pipeline's own surgery
-(`s3_surgery_and_resources.py`'s `mask_surgery()`, which rewires
-`input_layer2` directly into each layer's attention-mask consumer) or in
-DFC's own softmax-layer construction the per-head boundary gets lost —
-compare against how Hailo's own official multi-head LLM `.alls`/HN
-structures per-head softmax reduction (if inspectable) to see whether
-this project's mask-tiling convention (`causal_mask_tiled()`, tiling the
-same `[SEQ,SEQ]` block `NHEAD` times into the last axis) is fundamentally
-incompatible with how DFC's `SoftmaxLayer` infers its reduction axis, or
-whether there's a per-layer/per-op config (an axis or `group_size`
-parameter) that tells the softmax layer to reduce in blocks of `SEQ`
-rather than over the full input width. Also verify whether this affects
-the compiled (quantized, on-chip) graph identically — everything measured
-in this document is `SDK_NATIVE` (float32 simulation); the compiled HEF's
-softmax could plausibly use a different reduction mechanism at the
-hardware level, worth checking via `hef_audit.py`'s structural inspection
-before assuming the hardware inherits this exact bug.
+**Does real hardware share this bug, or only the SDK emulation?** This is
+now the single highest-value open question in the whole project — if the
+answer is "yes, hardware also ignores per-head grouping," it would mean
+this pipeline's entire mask-tiling convention (`causal_mask_tiled()`,
+concatenating `NHEAD` copies of the causal mask into one wide axis) is
+fundamentally incompatible with how Hailo's own attention primitive
+executes, and would need a different masking/grouping approach from the
+ground up — not a quick patch. If the answer is "no, only the `call_hw_sim`
+emulation path has this bug, real silicon groups correctly," the fix might
+be as narrow as "trust the hardware, stop trusting `SDK_NATIVE`/
+`SDK_BIT_EXACT` for attention-softmax-adjacent fidelity checks." Two ways
+to find out, in order of cost:
+
+1. Compare against how Hailo's own official multi-head LLM `.alls`/HN
+   constructs its attention mask and softmax `groups` — if their mask
+   convention differs from `causal_mask_tiled()`'s single-wide-axis tiling
+   in a way that sidesteps `call_hw_sim`'s missing grouping (e.g. if their
+   HN never produces a `groups > 1` softmax in the first place, using a
+   genuinely separate per-head tensor dimension instead of tiling into
+   width), that's strong indirect evidence real hardware needs true
+   per-head tensor separation, not just a `groups` metadata flag DFC's own
+   emulator fails to honor.
+2. Directly compare base-scope hardware output (already measured as
+   incoherent in this document, e.g. the Felladrin calibset-128 run:
+   `<s> < " ⏎ - . ( : " ⏎`) against what this bug predicts: reconstruct
+   the "shared-softmax" attention output analytically (as done above for
+   `SDK_NATIVE`) and check whether *hardware's* actual output tracks the
+   shared-softmax prediction or the correct-per-head prediction more
+   closely. If hardware tracks the broken prediction, that's direct
+   confirmation silicon has the same bug (or at least the same observable
+   behavior) as `call_hw_sim`.
