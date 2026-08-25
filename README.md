@@ -172,9 +172,24 @@ python /repo/pipeline/s6_compile_hef.py
 ```
 
 Each step reads and writes only `DFC_WORKDIR` (default `./workdir`) and can
-be re-run independently. To compile a different model, edit
-[`pipeline/config.py`](pipeline/config.py) — every architectural constant
-(hidden size, heads, RoPE theta, sequence lengths…) lives there.
+be re-run independently. To compile a **different model**, pass `--model`
+to step 1 only — it derives every architectural constant (hidden size,
+heads, RoPE theta, vocab…) from the checkpoint via `transformers.AutoConfig`
+and persists them to `$DFC_WORKDIR/run_config.json`; steps 2-6 pick that up
+automatically, no flags needed:
+
+```bash
+python /repo/pipeline/s1_export_onnx.py --model <hf-id> \
+    [--seq 24] [--prefill-size 16] [--calibset-size 32] [--net-scope name]
+```
+
+The checkpoint must pass the eligibility screen in
+[Porting-Another-Model](../../wiki/Porting-Another-Model) (untied
+embeddings, RMSNorm + RoPE + SwiGLU MLP + GQA-or-MHA attention) — anything
+else fails loudly at step 1 or 2, not silently. `--seq`/`--prefill-size`/
+`--calibset-size` aren't derivable from the checkpoint and keep their
+current defaults unless overridden; `--net-scope` defaults to a slug of
+`--model`.
 
 > Prefer a single interactive run? [notebooks/walkthrough.ipynb](notebooks/walkthrough.ipynb)
 > executes the same chain end to end, with every step's logic unfolded in
