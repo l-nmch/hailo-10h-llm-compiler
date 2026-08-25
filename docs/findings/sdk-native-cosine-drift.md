@@ -79,6 +79,28 @@ failure.** Check whether the failing checkpoint fits the scale pattern
 above first; a drop that doesn't fit the pattern (e.g. a small,
 shallow model still failing) is more likely a real bug than benign drift.
 
+## Downstream symptom: base-scope generation stays incoherent regardless of calibration size
+
+Tested on hardware whether the `SDK_NATIVE` drift above translates into a
+quantization/calibration problem that more calibration data could paper
+over. On Felladrin (`hidden=768`, the same checkpoint from the table
+above), base-scope greedy generation was compared across three configs,
+all INT8 conv precision + `bias_correction`:
+
+| `calibset_size` | Base-scope greedy output |
+|---|---|
+| 32 | real content words + correct punctuation, not fully coherent |
+| 128 | `<s> < " ⏎ - . ( : " ⏎` — almost entirely punctuation/formatting tokens, no content words |
+
+Quadrupling the calibration set made the output **worse**, not better —
+rules out "not enough calibration samples" as the driver of Felladrin's
+incoherence. Consistent with the scale-drift hypothesis above: the defect
+tracks `hidden` size and is visible even in `SDK_NATIVE` (pre-quantization)
+simulation, so no purely quantization-side knob (calibration size,
+precision, bias_correction) is expected to fix it on its own. Next
+candidate to isolate: the layer-by-layer probe described below, run once
+before spending more hardware time on calibration-size sweeps.
+
 ## Next step (not yet done)
 
 Isolate which specific operation accumulates the drift — likely
