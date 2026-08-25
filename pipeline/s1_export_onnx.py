@@ -76,8 +76,21 @@ def make_repeat_kv_matrix(hd: int, n_kv_heads: int, n_rep: int) -> torch.Tensor:
     return m
 
 
+def make_head_seg_matrix(hd: int, n_heads: int) -> torch.Tensor:
+    """Segment-sum matrix over `n_heads` concatenated heads of width `hd`:
+    `x @ M` gives per-head sums (shape `[..., n_heads]`); `(x @ M) @ M.T`
+    broadcasts each head's sum back across its own `hd`-wide slice. Lets
+    per-head RMSNorm (QK-Norm) be computed with matmuls only — no
+    reshape/view, which the DFC parser's shape-format inference chokes on
+    (`ValueError: width is not in list`)."""
+    m = torch.zeros(hd * n_heads, n_heads)
+    for h in range(n_heads):
+        m[h * hd : (h + 1) * hd, h] = 1.0
+    return m
+
+
 def build_matmul_trick_matrices():
-    """Build the five RoPE/tiling/GQA constant matrices for the CURRENT
+    """Build the RoPE/tiling/GQA/QK-Norm constant matrices for the CURRENT
     config (config.HD/NHEAD/NKVHEAD/NREP). Must run after config.load() —
     these depend on the checkpoint's architecture, not just its size."""
     return SimpleNamespace(
@@ -86,6 +99,8 @@ def build_matmul_trick_matrices():
         tile_q=make_tile_matrix(config.HD, config.NHEAD),
         tile_k=make_tile_matrix(config.HD, config.NKVHEAD),
         repeat_kv=make_repeat_kv_matrix(config.HD, config.NKVHEAD, config.NREP),
+        head_seg_q=make_head_seg_matrix(config.HD, config.NHEAD),
+        head_seg_k=make_head_seg_matrix(config.HD, config.NKVHEAD),
     )
 
 
@@ -93,6 +108,18 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = config.RMS_EPS)
     variance = x.pow(2).mean(-1, keepdim=True)
     x = x * torch.rsqrt(variance + eps)
     return x * weight
+
+
+def rms_norm_headwise(
+    x: torch.Tensor, weight_tiled: torch.Tensor, seg_matrix: torch.Tensor,
+    hd: int, eps: float = config.RMS_EPS,
+) -> torch.Tensor:
+    """Per-head RMSNorm (QK-Norm) on a flat `[..., n_heads*hd]` tensor,
+    without reshaping to `[..., n_heads, hd]` — see `make_head_seg_matrix`."""
+    sumsq = x.pow(2) @ seg_matrix  # [..., n_heads]
+    variance = (sumsq @ seg_matrix.T) / hd  # [..., n_heads*hd], broadcast per head
+    x = x * torch.rsqrt(variance + eps)
+    return x * weight_tiled
 
 
 class GQALayer(torch.nn.Module):
@@ -112,6 +139,16 @@ class GQALayer(torch.nn.Module):
         self.Wgate = torch.nn.Parameter(layer.mlp.gate_proj.weight.detach().T.clone())
         self.Wup = torch.nn.Parameter(layer.mlp.up_proj.weight.detach().T.clone())
         self.Wdown = torch.nn.Parameter(layer.mlp.down_proj.weight.detach().T.clone())
+        # QK-Norm (Qwen3-style): optional per-head RMSNorm on Q/K, applied
+        # right after projection, before RoPE. Absent on LLaMA2-style models.
+        q_norm = getattr(layer.self_attn, "q_norm", None)
+        k_norm = getattr(layer.self_attn, "k_norm", None)
+        self.qk_norm = q_norm is not None and k_norm is not None
+        if self.qk_norm:
+            # Pre-tiled across heads once here (constant fold), so forward()
+            # stays matmul/elementwise-only — see rms_norm_headwise().
+            self.q_norm_w = torch.nn.Parameter(q_norm.weight.detach().clone() @ matrices.tile_q)
+            self.k_norm_w = torch.nn.Parameter(k_norm.weight.detach().clone() @ matrices.tile_k)
 
     def forward(self, x, attention_mask_tiled, k_cos_t, q_cos_t, k_sin_t, q_sin_t):
         residual = x
@@ -121,6 +158,9 @@ class GQALayer(torch.nn.Module):
         q = h @ self.Wq
         k = h @ self.Wk
         v = h @ self.Wv
+        if self.qk_norm:
+            q = rms_norm_headwise(q, self.q_norm_w, self.m.head_seg_q, config.HD)
+            k = rms_norm_headwise(k, self.k_norm_w, self.m.head_seg_k, config.HD)
         q = q * q_cos_t + (q @ self.m.rotate_half_q) * q_sin_t
         k = k * k_cos_t + (k @ self.m.rotate_half_k) * k_sin_t
         k = k @ self.m.repeat_kv  # GQA: expand KV heads to Q heads
