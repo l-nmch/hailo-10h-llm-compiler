@@ -1,17 +1,18 @@
 # Finding 9 — OPEN: `__tbt` cache reads return truncated tensors
 
-**Status: OPEN.** This page records the full evidence chain so the next
-person starts where we stopped. **See
-[sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) first** — a
-shared-across-heads softmax bug was just found and confirmed bit-exact,
-present on every checkpoint tested including the base-scope-only
-`SDK_NATIVE` path. It hasn't been directly tested against the `__tbt`
-symptoms below yet, but "real words, wrong order/weighting" is exactly
-the failure mode that bug would produce, and it would explain why no
-control experiment below (which all operate above the softmax layer, or
-assume the mask/attention math is correct) ever isolated a cache-specific
-mechanism. Worth re-testing the evidence below through that lens before
-spending more time on cache-addressing theories specifically.
+**Status: OPEN — the single remaining blocker.** Everything else in this
+repository is validated. This page records the full evidence chain so the
+next person starts where we stopped.
+
+A shared-across-heads softmax bug in DFC's `SDK_NATIVE`/`SDK_BIT_EXACT`
+emulation was investigated as a possible explanation for the symptoms
+below ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) — ruled
+out. TinyStories' real-hardware base-scope generation (no KV-cache
+involved, same attention/softmax mechanism) is coherent despite carrying
+that exact SDK-emulation defect, proving real silicon computes per-head
+softmax correctly. That bug is confirmed SDK-emulation-only; it does not
+explain the cache-read symptoms below. The cache-addressing evidence
+chain below remains the best lead.
 
 ## Symptom
 
