@@ -1,7 +1,8 @@
-# Finding 11 — ROOT CAUSE FOUND: DFC's `SoftmaxOp.call_hw_sim()` ignores its own `groups` parameter
+# Finding 11 — CLOSED (SDK-only defect, not hardware): `SoftmaxOp.call_hw_sim()` ignores its own `groups` parameter
 
 **Status: root cause confirmed at the exact source line, bit-exact
-(cosine 0.9999999999996048) in `SDK_NATIVE`.** DFC's HN correctly declares
+(cosine 0.9999999999996048) in `SDK_NATIVE` — and confirmed NOT present on
+real silicon** (see "Answered" below). DFC's HN correctly declares
 `groups=NHEAD` on every attention softmax layer (verified: `groups=24` for
 Felladrin, `groups=16` for TinyStories, both matching `NHEAD` exactly) —
 the compiler's own graph metadata is right. But the numeric emulation code
@@ -17,9 +18,12 @@ context this project has tried (`SDK_NATIVE`, `SDK_BIT_EXACT`; its own
 docstring says the numeric-run path is "hardware like — main emulation"),
 unconditionally calls `call_hw_sim()`, never `call_native()`. The grouped
 implementation exists in the same file and is simply never invoked by the
-path that matters. Given the "hardware like" framing in the SDK's own
-docstring, this plausibly also describes actual silicon behavior, not
-just an emulator quirk — unconfirmed, see "Next step" below.
+path that matters. Despite the "hardware like" framing in the SDK's own
+docstring, TinyStories' coherent base-scope hardware output rules out real
+silicon sharing this defect — practical impact is limited to **don't trust
+`SDK_NATIVE`/`SDK_BIT_EXACT` cosine as a fidelity signal for attention
+softmax**, not a masking/graph redesign. See "Answered" below for the
+evidence.
 
 ## Symptom
 
@@ -474,3 +478,51 @@ to find out, in order of cost:
    closely. If hardware tracks the broken prediction, that's direct
    confirmation silicon has the same bug (or at least the same observable
    behavior) as `call_hw_sim`.
+
+## Answered: real silicon does not share this bug — it's an SDK emulation-only defect
+
+Approach (2) above didn't need a new experiment — the answer was already
+sitting in this project's own prior evidence.
+[open-tbt-cache-read.md](open-tbt-cache-read.md)'s own control-experiment
+table and this document's earlier sections both already establish:
+**TinyStories' base-scope generation on real hardware is coherent**
+("...a small house near a park. The little girl loved...", cosine ≈0.99
+vs float32) — and this document already confirmed TinyStories has the
+identical `call_hw_sim` bug signature in `SDK_NATIVE` (16 nonzero,
+non-uniform columns at `q=0`, one per head, same as Felladrin). Base-scope
+generation exercises the exact same attention/mask/softmax mechanism as
+the layer-0 probe above, with no KV-cache involved — if the chip actually
+executed `call_hw_sim`'s shared-across-heads softmax, TinyStories'
+base-scope output would be exactly as broken as Felladrin's
+(`<s> < " ⏎ - . ( : " ⏎`), not multi-sentence coherent English. It isn't.
+**Real silicon computes per-head softmax correctly; the bug lives entirely
+in `SoftmaxOp.call_hw_sim()`'s software emulation, despite its own
+docstring calling that path "hardware like."**
+
+This resolves the priority question directly:
+
+- **No masking/grouping redesign is needed.** This pipeline's
+  `causal_mask_tiled()` convention and `mask_surgery()`'s `input_layer2`
+  rewiring are not the problem — the hardware handles them correctly.
+- **`SDK_NATIVE` and `SDK_BIT_EXACT` cosine numbers are not trustworthy
+  fidelity signals for attention-softmax correctness** on any checkpoint
+  with `NHEAD > 1` grouped softmax layers (i.e. every multi-head model
+  this pipeline compiles) — they will always show spurious degradation
+  from this SDK bug, unrelated to whether the compiled HEF will actually
+  behave correctly on hardware. `COSINE_MIN` gates in steps 2/3 should be
+  read with this in mind: a checkpoint failing that gate is not
+  necessarily broken on real silicon, and conversely a checkpoint passing
+  it is not proof the attention math is right either (TinyStories passed
+  at exactly 1.000000 while carrying this exact defect in its emulated
+  signal). Hardware remains, as `docs/status.md` already says elsewhere,
+  the only real judge.
+- **Felladrin's real hardware incoherence has a different, still-open
+  cause.** With this bug ruled out as the explanation, the earlier
+  scale/quantization-precision hypothesis
+  (`hidden`-size-correlated, INT8 better than INT4, calibset_size
+  increase making things worse not better) is back to being the leading
+  open explanation for why larger checkpoints produce incoherent
+  base-scope text on hardware while TinyStories doesn't — see the
+  "Downstream symptom" section above. This SDK bug and that hardware
+  symptom are now understood to be two separate open questions that
+  happened to look connected, not one and the same.
