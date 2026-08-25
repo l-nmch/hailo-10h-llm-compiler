@@ -141,6 +141,19 @@ same on hardware). Updated table:
 | Felladrin/Smol-Llama-101M-Chat-v1 | 768 | 24 | ❌ incoherent |
 | JackFram/llama-160m | 768 | 12 | ❌ incoherent |
 
+**Counter-evidence this pattern is a hardware/scale limit**: Hailo's own
+official Qwen2.5-1.5B HEF (`hidden_size=1536`, exists and ships
+officially) is two full scale-steps above the largest failing checkpoint
+here (768) and presumably works correctly in production. This rules out
+"the chip/DFC simply can't handle `hidden > 256`" as an explanation — if
+it could, an official 1536-hidden model wouldn't ship. The real driver is
+more likely something specific to *this project's own* recipe/pipeline at
+that scale (quantization precision choices, a resource/config default
+that's fine at small `hidden` but wrong at larger ones, etc.), not a
+hardware ceiling. Worth comparing against the official Qwen recipe's
+scale-dependent settings (if any) rather than assuming this project's
+current recipe should simply generalize unchanged.
+
 ## Attempted: tapping post-quantization activations to test causality, not just correlation
 
 To distinguish whether the base-scope incoherence above is *caused* by the
