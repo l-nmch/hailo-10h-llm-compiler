@@ -121,6 +121,26 @@ precision, bias_correction) is expected to fix it on its own. Next
 candidate to isolate: the layer-by-layer probe described below, run once
 before spending more hardware time on calibration-size sweeps.
 
+**A third real-hardware data point confirms the pattern.**
+`nickypro/tinyllama-15M` (`hidden=288`, `NHEAD=6` MHA, 6 layers, tied
+embeddings — compiled after the tied-embeddings support added this
+session) produces fully coherent base-scope generation on hardware:
+*"Once upon a time, there was a loyal dog named Buddy. Buddy loved to
+play outside in the yard"*. Its `hidden`/`NHEAD` both land close to
+TinyStories' (256/16), far below Felladrin's and JackFram's (768,
+24/12) — consistent with the working hypothesis that the base-scope
+hardware symptom tracks `hidden`/head-count scale, not architecture
+family (this checkpoint is plain MHA with tied embeddings, neither
+property shared with TinyStories' GQA/untied setup, yet it behaves the
+same on hardware). Updated table:
+
+| Checkpoint | hidden | NHEAD | Base-scope hardware output |
+|---|---|---|---|
+| TinyStories-LLaMA2-25M | 256 | 16 | ✅ coherent |
+| `nickypro/tinyllama-15M` | 288 | 6 | ✅ coherent |
+| Felladrin/Smol-Llama-101M-Chat-v1 | 768 | 24 | ❌ incoherent |
+| JackFram/llama-160m | 768 | 12 | ❌ incoherent |
+
 ## Attempted: tapping post-quantization activations to test causality, not just correlation
 
 To distinguish whether the base-scope incoherence above is *caused* by the
