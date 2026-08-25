@@ -55,6 +55,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
     P = config.paths()
 
     scope = config.NET_SCOPE
