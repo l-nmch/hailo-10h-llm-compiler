@@ -363,6 +363,40 @@ quantization-recipe or calibration-size change (bias_correction,
 `calibset_size`) ever helped: the bug is upstream of quantization
 entirely, in the float32 `SDK_NATIVE` graph itself.
 
+## This affects TinyStories too, and predates every change made this session
+
+Before assuming this is scale-specific or newly introduced, both were
+checked directly:
+
+**TinyStories has the identical bug.** Repeating the `q=0` diagnostic on
+`Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA` (`NHEAD=16`) — the project's
+original, previously-"validated" default — gives the same signature:
+16 nonzero columns at indices `0, 24, 48, ..., 360` (again `head*SEQ`),
+with non-uniform values (`[0.013, 0.017, 0.112, 0.016, ..., 0.025]`)
+instead of `1.0` at each head. The exact same shared-across-heads softmax
+bug is present. It just never surfaced as a final-logits cosine failure
+(TinyStories' `SDK_NATIVE` cosine is exactly `1.000000`) — apparently this
+small/simple checkpoint's attention patterns happen to still produce a
+numerically-close final output despite the structurally wrong per-head
+computation feeding into it. **A perfect final-logits cosine is not
+proof of a correct intermediate computation graph** — this whole
+investigation exists because nobody had probed intermediate layers before
+today.
+
+**The bug predates this session's `mask_surgery()` generalization.**
+`git show 6cf9164:pipeline/s3_surgery_and_resources.py` (the project's
+very first commit) shows the *original*, hardcoded-4-layer `mask_surgery()`
+doing exactly the same rewiring as today's generalized version — same
+`ew["input"] = [il2_name if x == slice_name else x for x in ew["input"]]`,
+same `input_repeats=[[1,1,1],[1,1,1]]`, same `input_tiles` removal, just
+driven by a fixed `MASK_EW_ADDS` list instead of discovering the slice
+layers dynamically. This session's earlier fix (`13f5bbe`, generalizing
+`mask_surgery()` past 4 layers) reused the same core logic byte-for-byte —
+**this is not a regression introduced today**, it's a structural bug in
+the mask/softmax wiring design present since the project's inception,
+never caught because the only fidelity check ever applied was final-logits
+cosine.
+
 ## Next step (not yet done)
 
 This is now a masking/graph-construction question, not a numerics
