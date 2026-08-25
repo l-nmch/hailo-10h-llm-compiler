@@ -50,6 +50,19 @@ a second, misleading failure a few seconds later.
    from the same software-suite drop; mixed versions fail in confusing
    ways. Check all three before deep-diving logic.
 
+## Scheduler-level tracing — known broken on Hailo-10H as of HailoRT 5.3.0
+
+HailoRT has an `.hrtt` trace-file mechanism (`ActivateCoreOp`,
+`SwitchCoreOp`, frame enqueue/dequeue events) driven by env vars:
+`HAILO_TRACE`, `HAILO_TRACE_PATH`,
+`HAILO_TRACE_TIME_IN_SECONDS_BOUNDED_DUMP`, `HAILO_MONITOR`. On Hailo-10H
+with HailoRT 5.3.0, the `.hrtt` file is created but stays **empty (0
+bytes)** — `strace` confirms the profiler thread opens and closes the
+file without ever writing to it. No Hailo response, no known workaround,
+[reported on the public forum](https://community.hailo.ai/t/title-hailo-trace-scheduler-produces-empty-hrtt-file-on-hailo-10h-hailort-5-3-0-is-scheduler-level-tracing-supported-on-h10/19694).
+Don't spend time chasing this on 5.3.0; worth a quick retry if/when
+upgrading past it.
+
 ## Things that look like this class of bug but aren't
 
 - **Interrupt/session failures on long-lived processes** — environmental,
