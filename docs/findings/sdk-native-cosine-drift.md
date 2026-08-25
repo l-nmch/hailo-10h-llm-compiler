@@ -1,0 +1,93 @@
+# Finding 11 — OPEN: `SDK_NATIVE` cosine drifts with model scale, not architecture
+
+**Status: open, root cause not yet isolated.** Documented now so the
+`COSINE_MIN` setting it motivates isn't mistaken for an unexplained
+tolerance bump, and so the next person doesn't have to re-derive this
+table from scratch.
+
+## Symptom
+
+Step 2's fidelity gate (cosine of DFC's `SDK_NATIVE` simulation vs
+float32 HF, normally > 0.999) degrades on checkpoints other than the
+validated 4-layer/256-hidden default — while step 1's gate (pure PyTorch
+reimplementation + ONNX export vs HF, same threshold) stays at or near
+1.0 on every checkpoint tried except the most extreme one. The divergence
+is introduced specifically inside DFC's own simulation, not in this
+project's exporter.
+
+## Investigation
+
+Five checkpoints compiled end to end through step 1/2 (see
+`Porting-Another-Model.md`'s eligibility screen — all pass it: untied
+embeddings, no attention/MLP bias, standard RoPE):
+
+| Checkpoint | hidden | heads (Q/KV) | layers | step 1 cosine | step 2 (`SDK_NATIVE`) cosine |
+|---|---|---|---|---|---|
+| TinyStories-LLaMA2-25M (validated default) | 256 | 16/8 (GQA) | 4 | 1.000000 | 1.000000 |
+| Maykeye/TinyLLama-v0 | 64 | 16/16 (MHA) | 8 | 1.000000 | 0.995502 |
+| Felladrin/Smol-Llama-101M-Chat-v1 | 768 | 24/8 (GQA) | 6 | 0.999994 | 0.978675 |
+| JackFram/llama-160m | 768 | 12/12 (MHA) | 12 | 1.000000 | 0.972556 |
+| TinyLlama/TinyLlama_v1.1 | 2048 | 32/4 (GQA) | 22 | 0.768992 | *(never reached step 2 — failed at step 1)* |
+
+**GQA vs MHA is not the driver**: Felladrin (GQA) and JackFram (MHA) land
+at nearly the same cosine (0.979 vs 0.973) despite different attention
+mechanisms. **Layer count alone doesn't explain it either**: Felladrin (6
+layers) degrades *more* than Maykeye (8 layers). The one clean pattern:
+Felladrin and JackFram both have `hidden=768` and land within 0.006 cosine
+of each other, while the only checkpoint with `hidden=256` is exact.
+Working hypothesis: float32 accumulation drift between `SDK_NATIVE` and
+PyTorch/ONNX Runtime grows with model **scale** (hidden size, plausibly
+compounded by depth) — not with the attention architecture choice.
+
+TinyLlama_v1.1 (hidden=2048, 22 layers — the largest and deepest
+checkpoint tried) is a different, more severe case: it fails **step 1**
+(the pure-PyTorch reimplementation check, cosine 0.77), before DFC is
+even involved. Its config rules out the obvious suspects (no attention or
+MLP bias, standard `rope_theta=10000.0`, no `rope_scaling`,
+`rms_norm_eps=1e-5` correctly read).
+
+**Hypothesis tested and refuted**: the checkpoint's loaded model uses the
+`LlamaSdpaAttention` class (a fused-kernel attention path with a
+different accumulation order than this project's manual
+matmul+softmax+matmul reimplementation) despite `_attn_implementation`
+reporting `"eager"` in its config — a plausible source of exactly this
+kind of scale-amplified divergence. Forcing
+`AutoModelForCausalLM.from_pretrained(..., attn_implementation="eager")`
+in step 1 (now the default for all checkpoints, harmless elsewhere)
+produced the **exact same cosine to six decimal places** — no effect
+whatsoever. On CPU (no CUDA available in this project's toolchain
+images), PyTorch's SDPA falls back to the same reference math as eager,
+so the two paths were never actually numerically different here. Ruled
+out with evidence, not assumption.
+
+Root cause still open. **Deliberately not investigated further at this
+pass** — tracked as the concrete next step below, alongside isolating the
+scale-drift operation.
+
+## Mitigation shipped
+
+`config.COSINE_MIN` (default `0.999`, the validated bar) is now a
+first-class, explicit setting — `--cosine-min` on step 1, threaded to
+steps 1-3 via `run_config.json`. It is never silently below default:
+every step that reads a relaxed value prints a warning naming it. This
+lets a checkpoint whose drift is understood and judged benign proceed
+past step 2, without moving the bar for the validated default path or
+hiding the fact that a non-standard bar was used.
+
+**Do not reach for a lower `COSINE_MIN` as a first response to a step 2
+failure.** Check whether the failing checkpoint fits the scale pattern
+above first; a drop that doesn't fit the pattern (e.g. a small,
+shallow model still failing) is more likely a real bug than benign drift.
+
+## Next step (not yet done)
+
+Isolate which specific operation accumulates the drift — likely
+candidates given the shape of the pattern: softmax normalization,
+RMSNorm's variance reduction, or the order of accumulation in the
+attention/MLP matmuls at larger hidden widths. A layer-by-layer cosine
+probe (compare `SDK_NATIVE` intermediate activations against the PyTorch
+reimplementation's, not just the final logits) on `Felladrin/Smol-Llama-101M-Chat-v1`
+would localize it without needing TinyLlama_v1.1's expense. Diagnosing
+TinyLlama_v1.1's step-1 failure separately is worthwhile once the
+scale-drift question is settled — right now it's a confound, not
+evidence either way.

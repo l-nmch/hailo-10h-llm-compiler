@@ -15,6 +15,15 @@ the KV-cache disabled is coherent. **Multi-token generation through the
 KV-cache path produces degraded text** — one open issue remains
 ([findings/open-tbt-cache-read.md](findings/open-tbt-cache-read.md)).
 
+**Generalization in progress.** The pipeline no longer hardcodes one
+checkpoint: `pipeline/s1_export_onnx.py --model <hf-id>` derives every
+architecture constant from `transformers.AutoConfig` and steps 2-6 pick it
+up automatically. Validated end to end (step 1 + step 2's `SDK_NATIVE`
+fidelity gate) on 4 additional checkpoints spanning GQA and MHA, 4-22
+layers, 64-768 hidden — all pass step 1; step 2's cosine degrades with
+model scale on larger checkpoints, a second open issue
+([findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
+
 ## Stage-by-stage
 
 | Stage | State | Notes |
