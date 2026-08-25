@@ -99,6 +99,37 @@ against an ONNX Runtime FP32 reference) exists as the intended
 verification method but its output wasn't captured to a log — rerun it
 before relying on this recipe for anything beyond "it compiles".
 
+## Caution for higher-precision attempts on similar encoders
+
+This recipe stays at the default INT4/INT8 precision path (only
+`ew_add*` bumped to `a16_w16`). Fernando_Soria, attempting **full**
+`a16`/`w16` precision on a similar sentence-transformer encoder
+(`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, same
+architecture family), hit a three-stage compiler crash cascade, reported
+on the [public Hailo forum](https://community.hailo.ai/t/hailo-10h-dfc-v5-3-0-a16-w16-on-a-transformer-encoder-is-not-a-blanket-allocator-wall-its-a-3-stage-cascade-attention-crash-a16-conv-nan-exponent-needs-super-defuse-what-is-the-intended-16-bit-path/19530):
+`BackendAllocatorException` on 16-bit attention softmax, a NaN-exponent
+error from `a16`'s high/low convolution decomposition when residuals are
+near-zero, and an `Assignment needs super-defuse` error on non-convolution
+layers with no Hailo-side workaround at time of writing. Not hit here —
+this recipe never asks for full 16-bit — but worth knowing before pushing
+precision higher on this model family.
+
+A [follow-up post by Fernando_Soria on the same thread](https://community.hailo.ai/t/hailo-10h-dfc-v5-3-0-a16-w16-on-a-transformer-encoder-is-not-a-blanket-allocator-wall-its-a-3-stage-cascade-attention-crash-a16-conv-nan-exponent-needs-super-defuse-what-is-the-intended-16-bit-path/19530/3)
+reports a second, independent finding worth carrying over here: on a
+12-layer transformer encoder, enabling the
+accuracy stages (`equalization`, `finetune`, `bias_correction`) at
+`optimization_level>0` **collapsed retrieval top-1 accuracy from 58.3% to
+4.2%** — catastrophic, not a minor regression — with `optimization_level=0`
+recommended as the only safe setting for encoder models. This recipe
+already uses `optimization_level=0` and no accuracy stages, consistent
+with that finding. Notable because this project separately found
+`bias_correction` alone measurably *improves* cosine on a causal LLM
+decoder (`quantization-recipe.md`) — the two results aren't in tension,
+they suggest whether accuracy stages help or hurt is architecture-class
+dependent (causal decoder vs. bidirectional encoder), not a universal
+rule either way. Re-verify before assuming either direction on a new
+architecture.
+
 ## Scope note
 
 This is a materially different capability than the rest of this
