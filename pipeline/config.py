@@ -91,7 +91,7 @@ BLOCKED = -100.0
 # attribute path (`model.layers`, `model.norm`, `model.embed_tokens`) this
 # pipeline's exporter relies on. Not exhaustive — a mismatch is a warning,
 # not a hard stop, since the real test is whether s1/s2 actually succeed.
-_KNOWN_ELIGIBLE_ARCHITECTURES = ("Llama", "Mistral", "Qwen2")
+_KNOWN_ELIGIBLE_ARCHITECTURES = ("Llama", "Mistral", "Qwen2", "Qwen3")
 
 
 def _run_config_path(workdir: Path) -> Path:
