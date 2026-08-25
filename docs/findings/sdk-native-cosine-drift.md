@@ -1,9 +1,14 @@
-# Finding 11 — OPEN: `SDK_NATIVE` cosine drifts with model scale, not architecture
+# Finding 11 — ROOT CAUSE FOUND: DFC's softmax normalizes across heads instead of per-head
 
-**Status: open, root cause not yet isolated.** Documented now so the
-`COSINE_MIN` setting it motivates isn't mistaken for an unexplained
-tolerance bump, and so the next person doesn't have to re-derive this
-table from scratch.
+**Status: root cause confirmed bit-exact (cosine 0.9999999999996048) in
+`SDK_NATIVE`.** What started as an unexplained cosine-drift correlation
+with model scale turned out to be one specific, reproducible bug: DFC's
+compiled softmax for this project's head-tiled causal-mask scheme reduces
+over the entire `NHEAD*SEQ` axis as a single softmax instead of `NHEAD`
+independent per-head softmaxes — see "Root cause confirmed" below for the
+proof. Still open: whether the compiled/quantized HEF (not just the
+`SDK_NATIVE` float32 simulation measured here) shares the same mechanism,
+and exactly where in the graph the per-head boundary is lost.
 
 ## Symptom
 
@@ -309,13 +314,72 @@ TinyStories' simple layout surviving it while others don't. Whether it's
 a genuine DFC bug or a layout-assumption error in this analysis is not
 yet settled.
 
+## Root cause confirmed, bit-exact: DFC's softmax is shared across all heads instead of per-head
+
+Rather than guess at the axis layout, read it directly off real data that
+was already collected: at query position `q=0`, the causal mask permits
+attending *only* to key position `k=0` — true independently of any axis
+ordering ambiguity. Inspecting `softmax1`'s raw `(24, 576)` tensor at row
+`q=0` directly: exactly 24 nonzero columns, at indices
+`0, 24, 48, 72, ..., 552` — i.e. `head * SEQ + 0`, confirming the
+`(seq_q, NHEAD, seq_k)` block-per-head layout used throughout this
+document is correct after all. But their **values are not uniform** —
+`[0.037, 0.206, 0.038, 0.028, 0.001, ..., 0.107]`, spread unevenly across
+the 24 heads rather than each head independently landing on exactly
+`1.0` (the only mathematically valid value for a per-head softmax with
+exactly one unmasked key). **This is the proof, not an inference**: a
+correct per-head softmax has no free parameter to produce anything but
+`1.0` at `q=0`'s single valid key per head; DFC produces a distribution
+across heads instead, meaning the 24 head-slots are competing for shared
+probability mass.
+
+Confirmed exactly by reproducing it: scale `matmul1`'s raw QK^T scores by
+`1/sqrt(HD)` (`HD=32`, so `1/sqrt(32)`), add `config.causal_mask_tiled()`
+(the literal tensor `input_layer2` receives) unchanged, and take **one
+softmax over the full 576-wide row** (not per-head) — this reproduces
+`softmax1` at **cosine 0.9999999999996048**, bit-exact. (The earlier
+"0.7703" result above used the same recipe without the `1/sqrt(HD)`
+scale — the missing scale factor, not the axis layout, was why that
+attempt fell short.)
+
+**Root cause, stated precisely**: DFC's compiled softmax for this
+project's head-tiled attention-mask scheme reduces over the entire
+tiled `NHEAD*SEQ` axis as a single softmax, instead of `NHEAD`
+independent softmaxes each over `SEQ` keys. Every head's attention
+weights are computed by competing against every other head's raw scores
+for a shared normalization budget — mathematically wrong multi-head
+attention, structurally, not a numerical precision artifact. This fully
+explains the `SDK_NATIVE` cosine-drift table at the top of this document
+(worse with more heads / larger tiled mask width, not with `hidden` size
+per se — `NHEAD` and `hidden` happened to covary across the checkpoints
+tested here), why depth compounds it (each layer's attention output is
+wrong, corrupting every downstream layer), and is a strong candidate for
+the underlying mechanism behind both the base-scope incoherence
+documented earlier in this file and
+[open-tbt-cache-read.md](open-tbt-cache-read.md)'s KV-cache incoherence —
+"real words, wrong order/weighting" is exactly the failure mode a
+shared-normalization-across-heads bug produces, and it explains why no
+quantization-recipe or calibration-size change (bias_correction,
+`calibset_size`) ever helped: the bug is upstream of quantization
+entirely, in the float32 `SDK_NATIVE` graph itself.
+
 ## Next step (not yet done)
 
-Before concluding this is a DFC bug rather than an analysis error: verify
-`softmax1`'s actual output-axis layout directly, rather than guessing from
-plausible reshapes. The cleanest way is a synthetic calibration input
-where the expected attention pattern is analytically known per head (e.g.
-one-hot or strongly-peaked Q/K per head with a distinct, recognizable
-peak position per head) — the recovered peak positions in `softmax1`'s raw
-576-wide layout will reveal the true `(seq_q, ?, ?)` axis ordering
-unambiguously, replacing the two guesses tried here.
+This is now a masking/graph-construction question, not a numerics
+question. Locate exactly where in this pipeline's own surgery
+(`s3_surgery_and_resources.py`'s `mask_surgery()`, which rewires
+`input_layer2` directly into each layer's attention-mask consumer) or in
+DFC's own softmax-layer construction the per-head boundary gets lost —
+compare against how Hailo's own official multi-head LLM `.alls`/HN
+structures per-head softmax reduction (if inspectable) to see whether
+this project's mask-tiling convention (`causal_mask_tiled()`, tiling the
+same `[SEQ,SEQ]` block `NHEAD` times into the last axis) is fundamentally
+incompatible with how DFC's `SoftmaxLayer` infers its reduction axis, or
+whether there's a per-layer/per-op config (an axis or `group_size`
+parameter) that tells the softmax layer to reduce in blocks of `SEQ`
+rather than over the full input width. Also verify whether this affects
+the compiled (quantized, on-chip) graph identically — everything measured
+in this document is `SDK_NATIVE` (float32 simulation); the compiled HEF's
+softmax could plausibly use a different reduction mechanism at the
+hardware level, worth checking via `hef_audit.py`'s structural inspection
+before assuming the hardware inherits this exact bug.
