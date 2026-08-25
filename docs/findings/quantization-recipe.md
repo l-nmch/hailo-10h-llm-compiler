@@ -19,6 +19,9 @@ model_optimization_config(globals, multiproc_policy=disabled)
 model_optimization_config(calibration, batch_size=1, calibset_size=32,
                           use_saitama=True, device=cuda)
 model_optimization_flavor(compression_level=4, optimization_level=0)
+post_quantization_optimization(bias_correction, policy=enabled, use_saitama=True, device=cuda)
+post_quantization_optimization(adaround, policy=disabled)
+post_quantization_optimization(finetune, policy=disabled)
 quantization_param([<scope>/input_layer1], precision_mode=a16_w16)
 quantization_param([<conv list>], precision_mode=a8_w4)
 ```
@@ -29,12 +32,29 @@ quantization_param([<conv list>], precision_mode=a8_w4)
   scopes and (measured) corrupts argmax behavior. Disabling it plus the two
   removals below produced the project's first exactly-correct argmax on
   silicon.
-- **No `bias_correction`, no `adaround`** — the official recipe uses
-  neither. Adding them did not improve and did complicate attribution.
-- **No `weight_group_size`** — incompatible with the PyTorch optimizer
-  (SDK bug); unnecessary without group-wise INT4 anyway.
+- **`bias_correction` enabled, `adaround`/`finetune` disabled** — earlier
+  drafts of this recipe followed the official Qwen2-1.5B `.alls` in
+  excluding all three. That's no longer this project's recipe: the ablation
+  table below shows `bias_correction` alone measurably *improves* cosine
+  (0.960, better than native fp32). `adaround` combined with it is a mild
+  net negative (not broken, just not worth it). `finetune` (QAT) combined
+  with it measured catastrophic — not a bug in finetune itself, a real
+  measured incompatibility between the two. Both stay explicitly disabled.
+  `use_saitama=True, device=cuda` must be set **on the
+  `bias_correction` directive itself**, not just the global calibration
+  one — otherwise it silently falls back to CPU (minutes instead of
+  seconds). **This is validated for causal LLM decoders specifically, not
+  a universal rule** — Fernando_Soria's [public report on the Hailo
+  forum](https://community.hailo.ai/t/hailo-10h-dfc-v5-3-0-a16-w16-on-a-transformer-encoder-is-not-a-blanket-allocator-wall-its-a-3-stage-cascade-attention-crash-a16-conv-nan-exponent-needs-super-defuse-what-is-the-intended-16-bit-path/19530/3)
+  found the opposite on a bidirectional transformer encoder (accuracy
+  stages collapsing retrieval top-1 from 58.3% to 4.2%; see the caution
+  note in `encoder-model-keras-registration.md`). Re-verify on a new
+  architecture class rather than assuming either direction.
+- **No `weight_group_size`** — incompatible with `bias_correction`+saitama
+  specifically (`FusedQWGModule` has no `mac` attribute in the SDK's
+  `bias_accumulator.py` — a real bug, not just "unnecessary").
 - **`optimization_level=0`** — any higher level silently re-enables
-  adaround/bias_correction/finetune, undoing the choices above.
+  `adaround`/`finetune` too, which we still want to stay off.
 - **`use_saitama=True`** — routes optimization through the PyTorch engine;
   required off-CUDA GPUs and also sidesteps TensorFlow-only code paths.
 - **Embeddings at `a16_w16`** — input_layer1 is read host-side as uint16
@@ -76,7 +96,10 @@ in this project.
 `finetune` combined with `bias_correction` is confirmed to break the model
 outright — never combine them. `adaround` alone is a slight net negative
 versus `bias_correction` alone here, consistent with the recipe above
-dropping both in favor of neither.
+dropping both in favor of neither. Consistent with Hailo staff confirming
+on the public forum that `adaround` and `finetune` are mutually exclusive
+within a single optimization pass in general (not LLM-specific) — this
+isn't a quirk of our recipe, it's a documented SDK constraint.
 
 ### The `adaround` crash: two diagnoses, only the second one was right
 
