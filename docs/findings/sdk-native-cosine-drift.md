@@ -126,6 +126,26 @@ correlation between the `SDK_NATIVE` drift and on-chip incoherence remains
 open; only a pre-quantization layer-by-layer probe (comparing `SDK_NATIVE`
 against the PyTorch reimplementation) is actually executable in software.
 
+## `SDK_BIT_EXACT` hits the identical structural bug, not a workaround
+
+A public tip (unrelated third party, general DFC performance advice) claims
+`InferenceContext.SDK_BIT_EXACT` gives the same quantized result 3x faster
+than `SDK_QUANTIZED`, with two caveats: hide the GPU from TensorFlow
+(`tf.config.set_visible_devices([], "GPU")`) *before* importing the SDK, and
+run evaluation with TF on CPU since bit-exact emulation is TF-only. Both
+applied here (plus `CUDA_VISIBLE_DEVICES=''`) and retested against
+`smol_llama_101m_chat_v1__prefill`. No change: `SDK_BIT_EXACT` reaches
+further into the call stack than `SDK_QUANTIZED` did
+(`_bit_exact_run` -> `call_bit_exact` -> `call_hw_sim`) but fails on the
+exact same `cache_concat_matmul1` concat-shape mismatch
+(`[1,1,8,792]` vs `[4096,1,16,792]`), with the identical `Cache` object
+passed through `kwargs` in both cases. Conclusion: the bug lives in the
+shared `Cache`/cache-concat subsystem itself, not in a particular
+`InferenceContext`'s execution path — switching emulation modes cannot
+route around it. The tip is presumably sound for non-KV-cache-duplicated
+graphs (ordinary CNN/vision models); it doesn't apply to this project's
+architecture.
+
 ## Next step (not yet done)
 
 Isolate which specific operation accumulates the drift — likely
