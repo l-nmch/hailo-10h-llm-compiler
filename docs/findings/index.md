@@ -23,7 +23,7 @@ to a detailed write-up with evidence and reproduction pointers.
 | 8 | SDK behaviors: broken quantized emulator on KV-cache graphs, implicit adaround re-enables, Keras registration, paths patch, EINTR interruptions | documented | [sdk-behavior-notes.md](sdk-behavior-notes.md) |
 | 9 | **OPEN** — __tbt cache reads return truncated tensors (~30% structurally zeroed columns) degrading multi-token generation | **open issue** | [open-tbt-cache-read.md](open-tbt-cache-read.md) |
 | 10 | Compiling encoder-only models (BERT/MiniLM-style) — out of main scope, validated side-path | done, scope note | [encoder-model-keras-registration.md](encoder-model-keras-registration.md) |
-| 11 | **OPEN** — `SDK_NATIVE` cosine drifts with model scale (hidden size), not attention architecture (GQA/MHA); root cause not yet isolated | **open issue** | [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) |
+| 11 | **ROOT CAUSE FOUND** — DFC's `SoftmaxOp.call_hw_sim()` ignores the HN's own `groups=NHEAD` metadata, computing one softmax shared across all attention heads instead of per-head; confirmed bit-exact, present on every checkpoint including the original TinyStories default; open question is whether real silicon shares the bug | **top-priority open issue** | [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) |
 
 ## How to read these
 
