@@ -241,7 +241,7 @@ Given this project's RoPE is reimplemented as an explicit matmul-trick
 differently), the QK matmul itself and/or the RoPE constant-matrix
 multiplication are the sharpest remaining suspects.
 
-## Root cause found: DFC's own softmax normalization is broken, not accumulation drift
+## Narrowed further: the break is between raw QK^T scores and the softmax output — exact mechanism still open
 
 Tapped `conv5`/`conv6`/`conv7` (layer 0's raw Q/K/V projections, pre-RoPE),
 `ew_mult1-4` (the RoPE `x*cos` / `rotate_half(x)*sin` components), and
@@ -257,49 +257,65 @@ gives 0.178):
 | Q/K/V raw projections (`conv5/6/7`) | 0.999988 (all three) |
 | RoPE `x*cos` / `rotate_half(x)*sin` (`ew_mult1-4`) | 0.999989 (all four) |
 | Raw QK^T scores, pre-mask (`matmul1`) | 0.999975 |
-| **Causal-masked softmax (`softmax1`)** | **0.4768** |
+| **`softmax1`, reshaped `(seq_q, NHEAD, seq_k)`-then-transposed and compared per-head to HF's real attention weights** | **0.4768** |
 
-Every single stage through raw attention scores is bit-exact. The break
-is isolated to one specific operation: masking + softmax normalization.
-Proof, not just correlation — recomputing causal-masked softmax by hand
-from DFC's own `matmul1` scores (numpy, standard causal upper-triangular
-mask, standard softmax) reproduces HF's real post-softmax attention
-weights (`output_attentions=True`) at **cosine 0.9999999999999838** —
-bit-exact. But DFC's own compiled `softmax1` layer output, for the same
-input, **does not sum to 1 across the key axis** — sample per-position row
-sums came out `[0.037, 0.019, 0.029, 0.0028, 0.134, ...]` instead of the
-`[1, 1, 1, ...]` a valid softmax must produce. This is not float32
-accumulation drift at all: it's DFC's compiled softmax, applied to the
-head-tiled causal mask layout this project's surgery step produces,
-normalizing incorrectly — most likely masking too many or the wrong
-positions before the softmax denominator is computed, given the row sums
-are all *below* 1 rather than scattered around it (consistent with the
-denominator summing over a shorter/wrong slice of the row than the
-numerator's valid entries span).
+Every stage through raw QK^T scores is bit-exact against a from-scratch
+reproduction. `softmax1` is not — but pin down what "not" means precisely,
+because an earlier pass through this analysis got it wrong and the
+correction matters:
 
-This reframes the whole `SDK_NATIVE` drift table at the top of this
-document: the earlier "drift grows with `hidden` size" pattern is likely
-a downstream *symptom* of this same softmax bug interacting differently
-with each checkpoint's specific `NHEAD`/`NKVHEAD`/mask-tiling geometry
-(TinyStories' small, simple 16/8-head layout happening to survive it,
-larger/differently-shaped head counts not), rather than independent
-evidence of scale-driven float32 accumulation. It also plausibly connects
-directly to `open-tbt-cache-read.md`'s KV-cache incoherence and to the
-base-scope incoherence documented above in this file — a broken softmax
-normalization would produce exactly this kind of "real words, wrong
-attention weighting" garbage output on hardware, independent of
-quantization precision or calibration size (consistent with today's
-calibset_size=128 test making things *worse*, not better — more
-calibration data cannot fix a structurally wrong softmax).
+**Retracted claim, corrected here**: an earlier version of this section
+claimed DFC's `softmax1` output "doesn't sum to 1 across the key axis"
+citing row sums like `[0.037, 0.019, ...]`. That was an artifact of
+reshaping `softmax1` to `(seq_q, NHEAD, seq_k)` *before* summing — summing
+the raw, un-reshaped `(24, 576)` tensor along its actual last axis gives
+row sums of `~1.0` everywhere (`0.9999999`–`1.0000001`), a completely
+normal softmax. **DFC's softmax layer does produce a valid, correctly
+normalized probability distribution.** The bug (if there is one, see
+below) is not "the softmax fails to normalize."
+
+What's still real: reshaping `softmax1` to `(seq_q, NHEAD, seq_k)` and
+comparing per-head slices against HF's real per-head attention weights
+gives cosine 0.4768, well below the near-1.0 match every earlier stage
+gets. Two competing explanations were tested:
+
+1. **Per-head softmax, `(seq_q, NHEAD, seq_k)` layout** — doesn't match
+   (that's the 0.4768 above).
+2. **A single softmax spanning the full 576-wide tiled axis** (masking
+   `matmul1` with `config.causal_mask_tiled()`, exact same tensor
+   `input_layer2` receives, then one softmax over all 576 elements per
+   row) — closer but still not exact: cosine 0.7703, not ~1.0.
+
+Neither simple hypothesis fully reproduces `softmax1`. Since `matmul1` is
+independently confirmed correct (0.999975 vs. from-scratch QK^T) and a
+correctly-masked, correctly-per-head softmax of those same scores
+reproduces HF's real attention at cosine 0.9999999999999838 (bit-exact,
+computed directly, not via DFC's graph), the discrepancy has to be in
+either (a) the exact axis/layout DFC's compiled softmax actually reduces
+over — possibly a permutation `(seq_q, seq_k, NHEAD)` or similar rather
+than `(seq_q, NHEAD, seq_k)` assumed above, which would also explain why
+neither simple hypothesis lined up — or (b) a scale/temperature difference
+between what `matmul1` stores and what actually feeds the compiled
+softmax. Root cause narrowed to this one operation but not yet pinned
+down to the exact mechanism.
+
+This still reframes the whole `SDK_NATIVE` drift table at the top of this
+document, just less definitively than the retracted version claimed: the
+divergence is real, isolated to the masking/softmax stage of layer 0's
+attention (not gradual float32 accumulation across depth — everything
+before this point is bit-exact), and interacts with each checkpoint's
+`NHEAD`/`NKVHEAD`/mask-tiling geometry, which is consistent with
+TinyStories' simple layout surviving it while others don't. Whether it's
+a genuine DFC bug or a layout-assumption error in this analysis is not
+yet settled.
 
 ## Next step (not yet done)
 
-Isolate exactly which masking step is wrong: compare DFC's tiled causal
-mask (`config.causal_mask_tiled()`, the actual tensor fed to
-`input_layer2`) against the untiled reference mask used in the
-from-scratch NumPy reproduction above, position by position, to find
-where the tiling introduces the wrong entries. Given the row-sums are
-uniformly *below* 1, check first whether the softmax denominator is
-summing over the tiled `NHEAD*SEQ` axis incorrectly (e.g. including
-some of the head-tiling repeats in the reduction, diluting the sum)
-rather than over the true `SEQ` key axis per head.
+Before concluding this is a DFC bug rather than an analysis error: verify
+`softmax1`'s actual output-axis layout directly, rather than guessing from
+plausible reshapes. The cleanest way is a synthetic calibration input
+where the expected attention pattern is analytically known per head (e.g.
+one-hot or strongly-peaked Q/K per head with a distinct, recognizable
+peak position per head) — the recovered peak positions in `softmax1`'s raw
+576-wide layout will reveal the true `(seq_q, ?, ?)` axis ordering
+unambiguously, replacing the two guesses tried here.
