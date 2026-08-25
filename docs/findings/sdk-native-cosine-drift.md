@@ -159,3 +159,22 @@ would localize it without needing TinyLlama_v1.1's expense. Diagnosing
 TinyLlama_v1.1's step-1 failure separately is worthwhile once the
 scale-drift question is settled — right now it's a confound, not
 evidence either way.
+
+**Attempted, blocked on tooling, not yet done.** `HailoNN.update_output_layers_order()`
+looked like the way to tap an arbitrary internal layer (`layer_normalization1`,
+`softmax1`, etc. — confirmed reachable by name and correctly mapped to
+`layers.0`/`layers.3`'s ops via `original_names`), but it only *selects
+among already-declared* graph outputs (it calls
+`get_real_output_layers_by_recipe()` internally, which is driven by the
+existing `output_layers_order`) — it cannot promote an arbitrary internal
+node into a new output. Doing that needs either (a) graph surgery that
+inserts a real `OutputLayer` node after the target layer, the same
+mechanism DFC itself uses internally to expose the `--include-base-scope`
+network group (no existing project code to copy — that insertion happens
+inside the SDK, not in this pipeline's own surgery step), or (b) dropping
+below `ClientRunner.infer()` entirely and pulling the intermediate tensor
+directly off the underlying Keras model DFC builds
+(`sdk_backend.build_acceleras_model()` returns a `keras.Model`; a
+functional-style rebuild with the target layer's output as a new model
+output is the standard Keras technique, untried here). Neither attempted
+yet — next session should start with (b), it's the smaller lift.
