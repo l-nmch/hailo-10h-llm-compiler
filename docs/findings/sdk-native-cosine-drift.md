@@ -101,6 +101,31 @@ precision, bias_correction) is expected to fix it on its own. Next
 candidate to isolate: the layer-by-layer probe described below, run once
 before spending more hardware time on calibration-size sweeps.
 
+## Attempted: tapping post-quantization activations to test causality, not just correlation
+
+To distinguish whether the base-scope incoherence above is *caused* by the
+same operation driving `SDK_NATIVE` drift, or is an independent symptom
+that merely shares `hidden` size as a confound, the plan was: compare
+intermediate activations at matching layers in `SDK_NATIVE` (pre-quant)
+vs. the actual post-quantization/on-chip domain. The hardware side is not
+reachable — the compiled HEF exposes only the final logits output
+(`conv71`), no intermediate taps. The software fallback,
+`InferenceContext.SDK_QUANTIZED`, was retried here specifically on the
+non-KV-cache-duplicated base scope in case that scope sidesteps the known
+cache bugs above — it does not: `Cache.__init__` still requires a
+`lora_adapter_name` matching one of `__prefill`/`__tbt` (raises
+`UnsupporteLoraAdapterException` otherwise, base scope isn't a valid
+adapter name at all), and even forcing `__prefill` specifically hits the
+exact same structural concat-shape bug already on record above (a
+`[1,1,8,792]` cache-write tensor concatenated against a `[4096,1,16,792]`
+conv output — batch/shape mismatch, independent of input data). Confirms
+finding #8's assessment is complete and general — this isn't a narrower
+bug that only affects `__tbt`; there is no working post-quantization
+emulation path for this project's graphs, full stop. Causality vs.
+correlation between the `SDK_NATIVE` drift and on-chip incoherence remains
+open; only a pre-quantization layer-by-layer probe (comparing `SDK_NATIVE`
+against the PyTorch reimplementation) is actually executable in software.
+
 ## Next step (not yet done)
 
 Isolate which specific operation accumulates the drift — likely
