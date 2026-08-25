@@ -128,9 +128,10 @@ against the PyTorch reimplementation) is actually executable in software.
 
 ## `SDK_BIT_EXACT` hits the identical structural bug, not a workaround
 
-A public tip (unrelated third party, general DFC performance advice) claims
-`InferenceContext.SDK_BIT_EXACT` gives the same quantized result 3x faster
-than `SDK_QUANTIZED`, with two caveats: hide the GPU from TensorFlow
+Fernando_Soria, on the same [public forum thread](https://community.hailo.ai/t/hailo-10h-dfc-v5-3-0-a16-w16-on-a-transformer-encoder-is-not-a-blanket-allocator-wall-its-a-3-stage-cascade-attention-crash-a16-conv-nan-exponent-needs-super-defuse-what-is-the-intended-16-bit-path/19530)
+already cited above, reports that `InferenceContext.SDK_BIT_EXACT` gives
+the same quantized result 3x faster than `SDK_QUANTIZED`, with two
+caveats: hide the GPU from TensorFlow
 (`tf.config.set_visible_devices([], "GPU")`) *before* importing the SDK, and
 run evaluation with TF on CPU since bit-exact emulation is TF-only. Both
 applied here (plus `CUDA_VISIBLE_DEVICES=''`) and retested against
@@ -142,9 +143,9 @@ exact same `cache_concat_matmul1` concat-shape mismatch
 passed through `kwargs` in both cases. Conclusion: the bug lives in the
 shared `Cache`/cache-concat subsystem itself, not in a particular
 `InferenceContext`'s execution path — switching emulation modes cannot
-route around it. The tip is presumably sound for non-KV-cache-duplicated
-graphs (ordinary CNN/vision models); it doesn't apply to this project's
-architecture.
+route around it. Fernando_Soria's tip is presumably sound for whatever
+non-KV-cache-duplicated graph he measured it on; it doesn't apply to this
+project's architecture.
 
 ## Next step (not yet done)
 
