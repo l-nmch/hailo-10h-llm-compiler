@@ -178,3 +178,65 @@ directly off the underlying Keras model DFC builds
 functional-style rebuild with the target layer's output as a new model
 output is the standard Keras technique, untried here). Neither attempted
 yet — next session should start with (b), it's the smaller lift.
+
+## Resolved: (b) worked — the drift is not gradual, it's a sharp break inside layer 0
+
+`HailoModel.set_output_interal_layers(names)` (note the SDK's own typo,
+"interal") is the intended public API for exactly this: call it on the
+model returned by `SDKBackend.build_acceleras_model(InferenceContext.SDK_NATIVE)`
+(reached via `ClientRunner._sdk_backend`, bypassing `.infer()` entirely),
+then `model.predict(inputs)` returns `(final_output, [internal_outputs...])`
+in the order requested. Internal layer names are the same HN layer names
+used elsewhere (`layer_normalization1`, `softmax1`, ...) — no graph
+surgery needed. RoPE inputs on the post-surgery HAR need the tiled widths
+from `s3_surgery_and_resources.py`'s `tile_groups()` helper (`NKVHEAD`/`NHEAD`
+groups of `HD`), not the untiled `[SEQ, HD]` shape step 2 uses on the
+pre-surgery HAR — the two steps' inputs are not interchangeable.
+
+Tapped Felladrin's `input_layernorm` output (pre-attention RMSNorm) at
+layers 0/1/3/5 and the final norm, in both `SDK_NATIVE` and a hooked
+PyTorch reference (same prompt, same `attn_implementation="eager"` model
+as step 1 uses). Note the HN decomposes RMSNorm into a normalize-only
+`layer_normalization*` op followed by a separate weight-multiply
+`mul_and_add*` op — tap the `mul_and_add*` one to match HF's full RMSNorm
+output (confirmed by matching mean/std before trusting the cosine numbers).
+
+| Probe point | cosine (`SDK_NATIVE` vs PyTorch) |
+|---|---|
+| Layer 0 input_layernorm | **0.999999999998** — bit-exact, not just "close" |
+| Layer 1 input_layernorm | 0.676 |
+| Layer 3 input_layernorm | 0.366 |
+| Layer 5 input_layernorm | 0.333 |
+| Final norm | 0.163 |
+
+This rules out gradual float32 accumulation drift as the mechanism — a
+gradual-drift hypothesis predicts a smooth cosine decay across depth, not
+a cliff between layer 0's input and layer 1's input while layer 0's own
+input is essentially perfect. Something inside layer 0's
+attention/RoPE/MLP block (between the input_layernorm tap and the next
+layer's input_layernorm tap) introduces the bulk of the error in one
+step, and every layer after that just carries it forward.
+
+Layer 0's attention softmax was also tapped
+(`smol_llama_101m_chat_v1/softmax1`) and compared against HF's
+`output_attentions=True` post-softmax weights, but the DFC tensor's
+head-tiling layout in the flattened last axis (576 = `NHEAD`×`SEQ`) isn't
+confirmed — cosine came out ~0.48 under the best-guess `(seq_q, heads,
+seq_k)` reshape, well below layer 0's near-perfect RMSNorm match, which is
+at least directionally consistent with the divergence originating inside
+layer 0's attention path (RoPE application or the QK/mask/softmax
+sequence) rather than in RMSNorm itself — but don't treat 0.48 as a
+trustworthy number until the tiling layout is verified against a known
+input pattern (e.g. an identity-like calibration input whose expected
+attention pattern is analytically known).
+
+## Next step (not yet done), revised
+
+Narrow inside layer 0's block: tap the Q/K/V projection outputs and the
+RoPE-rotated Q/K (before the QK matmul) against the same PyTorch hooks,
+to find exactly which operation between "RMSNorm output" (verified exact)
+and "attention softmax" (already degraded) introduces the divergence.
+Given this project's RoPE is reimplemented as an explicit matmul-trick
+(rotate-half via constant matrices, not a native op DFC might mishandle
+differently), the QK matmul itself and/or the RoPE constant-matrix
+multiplication are the sharpest remaining suspects.
