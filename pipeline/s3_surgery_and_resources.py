@@ -45,9 +45,8 @@ import config  # must precede numpy imports — sets NPY_PROMOTION_STATE et al.
 
 import numpy as np
 
-# Surgery tables: (input layer, duplication conv to remove, final head count)
+# Surgery table: (input layer, duplication conv to remove, final head count)
 ROPE_LAYERS = None  # built in main(), depends on NET_SCOPE
-MASK_EW_ADDS = ["ew_add3", "ew_add8", "ew_add13", "ew_add18"]  # one per layer
 
 
 def load_hn_from_har(har_path, tmpdir):
@@ -95,13 +94,35 @@ def rope_surgery(layers: dict, scope: str) -> None:
         print(f"  {input_name}: {old_shape} -> {new_shape}; removed {conv_name}")
 
 
-def mask_surgery(layers: dict, scope: str) -> None:
+def mask_surgery(layers: dict, scope: str) -> list:
+    """Rewire every mask-consuming element-wise add directly to input_layer2.
+
+    One such add exists per transformer layer, so the count scales with
+    NLAYERS. Discovered from input_layer2's own consumer list rather than a
+    hardcoded per-layer name pattern (e.g. ew_add3/8/13/18) — a fixed-length
+    list silently produces an inconsistent graph on any checkpoint with a
+    different layer count (see docs/findings/ for the finding this fixed).
+
+    Returns the list of removed slice layer names, for the caller to verify
+    none remain post-surgery.
+    """
     full_width = config.NHEAD * config.SEQ
     il2_name = f"{scope}/input_layer2"
     il2 = layers[il2_name]
-    for i, ew_name in enumerate(MASK_EW_ADDS, start=1):
-        slice_name = f"{scope}/slice{i}"
-        ew_full = f"{scope}/{ew_name}"
+    slice_names = [n for n in il2["output"] if layers[n].get("type") == "slice"]
+    assert slice_names, f"no slice layers found consuming {il2_name}"
+    assert len(slice_names) == config.NLAYERS, (
+        f"found {len(slice_names)} mask slices but NLAYERS={config.NLAYERS} "
+        "— one mask-consuming add is expected per transformer layer"
+    )
+
+    new_il2_output = list(il2["output"])
+    for slice_name in slice_names:
+        consumers = list(layers[slice_name]["output"])
+        assert len(consumers) == 1, (
+            f"{slice_name} has {len(consumers)} consumers, expected exactly 1"
+        )
+        ew_full = consumers[0]
         ew = layers[ew_full]
         # Reconnect directly to input_layer2 (already at full tiled width)
         # and neutralize any repeat/tile expansion params.
@@ -109,9 +130,11 @@ def mask_surgery(layers: dict, scope: str) -> None:
         ew["input_shapes"] = [[-1, 1, config.SEQ, full_width]] * 2
         ew["params"]["input_repeats"] = [[1, 1, 1], [1, 1, 1]]
         ew["params"].pop("input_tiles", None)
-        il2["output"] = [ew_full if x == slice_name else x for x in il2["output"]]
+        new_il2_output = [ew_full if x == slice_name else x for x in new_il2_output]
         del layers[slice_name]
-        print(f"  {ew_name}: rewired to {il2_name}; removed {slice_name}")
+        print(f"  {ew_full}: rewired to {il2_name}; removed {slice_name}")
+    il2["output"] = new_il2_output
+    return slice_names
 
 
 def build_hailo_config() -> dict:
@@ -205,6 +228,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
+    if config.COSINE_MIN < 0.999:
+        print(f"!! COSINE_MIN overridden to {config.COSINE_MIN} (validated default: 0.999) !!")
     P = config.paths()
 
     scope = config.NET_SCOPE
@@ -227,7 +253,7 @@ def main() -> None:
         rope_surgery(layers, scope)
 
         print("=== surgery 2/2: attention mask (direct wiring to input_layer2) ===")
-        mask_surgery(layers, scope)
+        removed_slices = mask_surgery(layers, scope)
 
         with open(hn_path, "w") as f:
             json.dump(hn, f)
@@ -243,8 +269,8 @@ def main() -> None:
     hn_dict = runner.get_hn_dict()["layers"]
     for _, conv_name, _ in ROPE_LAYERS:
         assert conv_name not in hn_dict, f"{conv_name} still present"
-    for i in range(1, len(MASK_EW_ADDS) + 1):
-        assert f"{scope}/slice{i}" not in hn_dict, f"slice{i} still present"
+    for slice_name in removed_slices:
+        assert slice_name not in hn_dict, f"{slice_name} still present"
 
     theta = config.head_dim_frequencies()
     angles = np.outer(np.arange(config.SEQ), theta.astype(np.float64))
@@ -268,7 +294,7 @@ def main() -> None:
     logits = np.array(out[0] if isinstance(out, list) else out).reshape(1, 1, -1)
     sim = config.cosine(hf_logits_last, logits)
     print(f"cosine(HF last position, HAR/SDK_NATIVE, post-surgery): {sim:.6f}")
-    assert sim > 0.999, "surgery broke model fidelity"
+    assert sim > config.COSINE_MIN, "surgery broke model fidelity"
 
     # --- Attach genai external resources ---
     print("=== attaching external resources ===")
