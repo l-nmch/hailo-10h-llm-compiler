@@ -99,7 +99,7 @@ def main() -> None:
     print(
         "\nnext steps:\n"
         "  1. restart the server (manifests are scanned at startup only):\n"
-        "       pkill -f 'hailo-ollama serve' && OLLAMA_HOST=0.0.0.0:8000 hailo-ollama serve &\n"
+        "       pkill -x hailo-ollama; OLLAMA_HOST=0.0.0.0:8000 hailo-ollama &\n"
         f"  2. generate:\n       curl -s -H 'Content-Type: application/json' "
         f"http://localhost:8000/api/generate \\\n"
         f"         -d '{{\"model\":\"{args.family}:{args.tag}\",\"prompt\":\"Once upon a time\",\"stream\":false}}'"
