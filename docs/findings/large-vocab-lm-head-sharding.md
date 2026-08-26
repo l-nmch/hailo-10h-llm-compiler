@@ -172,17 +172,56 @@ during attempt 1 (`s1_export_onnx.py`'s `Wlm_shards`,
 `Wlm` — the ONNX/step-1/step-2 layers should go back to always producing
 exactly one output; only the post-parse HN step needs to know about `N`.
 
+## A simpler native alternative exists (`defuse`), but doesn't work out of the box either
+
+The DFC user guide documents a built-in `defuse(layer, defuse_number)`
+model-script command, specifically for this: *"Defusing splits a logical
+layer into multiple physical layers... Feature defuse: Each physical
+layer calculates part of the output features... Like most mechanisms,
+the defuse mechanism happens automatically, so no user intervention is
+required."* This is precisely our symptom — worth trying before
+committing to the HN-edit approach, since it would need zero pipeline
+surgery and zero runtime-script changes (the compiler re-concatenates the
+physical layers back into one logical output automatically).
+
+Tried on the same TinyStories `convfixed.har`, splitting `conv49` (the
+lm_head, `VOCAB=32000`) into 2: `defuse1, defuse2, defuse_c =
+defuse(ts25mpipe/conv49, 2)` (all three return values required — omitting
+the auto-generated concat layer `defuse_c` throws
+`AllocatorScriptParserException`). Loads and starts compiling, but fails
+fast (2s) with a different error than attempt 1: `Auto defused failed
+layer ts25mpipe/defuse1 required too many SCs` (subclusters) — each
+16000-wide half apparently still doesn't fit as constructed, or is
+missing an explicit `compilation_param(..., resources_allocation_
+strategy=manual_scs_selection, number_of_subclusters=N)` override (the
+guide's compilation-parameters section suggests defuse's automatic SC
+allocation may need manual tuning for extreme cases like this). Not
+pursued further given the working alternative below already exists;
+worth revisiting since it would be the cleaner fix if made to work — no
+HN/hdf5 surgery, no runtime-script updates.
+
 ## Verification plan (remaining)
 
-Recompile `tabularisai/Qwen3-0.3B-distil` (already validated correct
-through step 4 quantization with the *unsharded* `lm_head` — see the
-`head_dim` commit) through step 6 with the real fix integrated, and
-confirm the HEF compiles at `VOCAB=151936`'s actual shard count (5, not
-the 2 used in the TinyStories proof of concept); then test base-scope
-generation on hardware for coherent output, same bar used throughout this
-project (`docs/status.md`'s "real English, cosine ≈ 0.99"). Runtime
-scripts (`runtime/diagnostics/generate_base_scope.py`,
-`runtime/genai_generate.py`, hailo-ollama serving path) still need
-updating to gather `N` outputs and concatenate before argmax/top-k —
-untested so far, the TinyStories proof of concept was only verified
-through HEF compilation, not hardware inference.
+Two paths forward, either untested end-to-end yet:
+
+1. **`defuse()` native command** — try higher `defuse_number` (more,
+   narrower physical layers) and/or explicit `compilation_param` SC
+   overrides on the defused layers; if it can be made to work, prefer it
+   over the HN-edit approach — it needs zero runtime-script changes since
+   the compiler reconstructs one logical output automatically.
+2. **HN-level split (attempt 2, proven)** — integrate into
+   `s3_surgery_and_resources.py` as described above.
+
+Whichever lands: recompile `tabularisai/Qwen3-0.3B-distil` (already
+validated correct through step 4 quantization with the *unsharded*
+`lm_head` — see the `head_dim` commit) through step 6, confirm the HEF
+compiles at `VOCAB=151936`'s actual shard count (5, not the 2 used in the
+TinyStories proof of concept), then test base-scope generation on
+hardware for coherent output, same bar used throughout this project
+(`docs/status.md`'s "real English, cosine ≈ 0.99"). If the HN-edit
+approach is what lands, runtime scripts
+(`runtime/diagnostics/generate_base_scope.py`, `runtime/genai_generate.py`,
+hailo-ollama serving path) still need updating to gather `N` outputs and
+concatenate before argmax/top-k — untested so far, the TinyStories proof
+of concept was only verified through HEF compilation, not hardware
+inference. The `defuse()` path would not need this runtime-script work.
