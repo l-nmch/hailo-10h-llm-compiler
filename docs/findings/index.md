@@ -24,6 +24,7 @@ to a detailed write-up with evidence and reproduction pointers.
 | 9 | **OPEN** — __tbt cache reads return truncated tensors (~30% structurally zeroed columns) degrading multi-token generation | **open issue** | [open-tbt-cache-read.md](open-tbt-cache-read.md) |
 | 10 | Compiling encoder-only models (BERT/MiniLM-style) — out of main scope, validated side-path | done, scope note | [encoder-model-keras-registration.md](encoder-model-keras-registration.md) |
 | 11 | **ROOT CAUSE FOUND** — DFC's `SoftmaxOp.call_hw_sim()` ignores the HN's own `groups=NHEAD` metadata, computing one softmax shared across all attention heads instead of per-head; confirmed bit-exact, present on every checkpoint including the original TinyStories default; open question is whether real silicon shares the bug | **top-priority open issue** | [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) |
+| 12 | **OPEN** — large-vocabulary `lm_head` (e.g. Qwen3's ~152K tokens) fails HEF placement as a single monolithic matmul; official Hailo HEFs shard it into multiple output convs instead | **open issue, fix identified** | [large-vocab-lm-head-sharding.md](large-vocab-lm-head-sharding.md) |
 
 ## How to read these
 

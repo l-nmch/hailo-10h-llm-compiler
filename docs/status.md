@@ -36,6 +36,16 @@ fidelity gate) on 4 additional checkpoints spanning GQA and MHA, 4-22
 layers, 64-768 hidden — all pass step 1; step 2's cosine degrades with
 model scale on larger checkpoints, a second open issue
 ([findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
+Tied embeddings, QK-Norm (Qwen3-style), and explicit `head_dim` are now
+supported and verified through quantization on real checkpoints
+(`nickypro/tinyllama-15M`, `Qwen/Qwen3-0.6B`,
+`tabularisai/Qwen3-0.3B-distil`). Full HEF compilation of a real Qwen3
+checkpoint is currently blocked by a separate, unrelated wall: any
+checkpoint sharing Qwen's ~152K-token vocabulary fails `lm_head`
+placement as this pipeline currently exports it as one monolithic matmul
+— official Hailo HEFs shard it into multiple output convs instead; fix
+identified, not yet implemented
+([findings/large-vocab-lm-head-sharding.md](findings/large-vocab-lm-head-sharding.md)).
 
 ## Stage-by-stage
 
