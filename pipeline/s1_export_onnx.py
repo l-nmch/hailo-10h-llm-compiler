@@ -201,17 +201,15 @@ class ExportableModelWithHead(torch.nn.Module):
         # `lm_head.weight` already holds the right values, and DFC's graph
         # has no notion of two ops sharing one weight tensor regardless.
         #
-        # Sharded into config.LM_HEAD_SHARDS equal-width column blocks —
-        # DFC's placer rejects a single matmul this wide once VOCAB is large
-        # (e.g. Qwen3's ~152K tokens); see
-        # docs/findings/large-vocab-lm-head-sharding.md. 1 shard (the
-        # common case) is one Parameter and one matmul, same as before.
-        wlm_full = hf_model.lm_head.weight.detach().T.clone()  # (HIDDEN, VOCAB)
-        shard_bounds = torch.linspace(0, config.VOCAB, config.LM_HEAD_SHARDS + 1, dtype=torch.long)
-        self.Wlm_shards = torch.nn.ParameterList([
-            torch.nn.Parameter(wlm_full[:, shard_bounds[i]:shard_bounds[i + 1]])
-            for i in range(config.LM_HEAD_SHARDS)
-        ])
+        # Always exported as ONE matmul, even for large-VOCAB checkpoints
+        # (e.g. Qwen3's ~152K tokens) where DFC's placer would reject it as
+        # a single op — splitting at export time (tried, reverted) hit a
+        # second, independent DFC parser bug. The working fix is a
+        # `defuse(<layer>, N)` model-script directive added in
+        # s6_compile_hef.py at compile time instead, which needs the
+        # unsharded single-matmul graph shape parsed here. See
+        # docs/findings/large-vocab-lm-head-sharding.md for the full story.
+        self.Wlm = torch.nn.Parameter(hf_model.lm_head.weight.detach().T.clone())  # (HIDDEN, VOCAB)
 
     def forward(self, token_embeds, attention_mask_tiled, pe_k_cos, pe_q_cos, pe_k_sin, pe_q_sin):
         x = token_embeds
@@ -224,16 +222,7 @@ class ExportableModelWithHead(torch.nn.Module):
         x = x.reshape(x.shape[0], x.shape[1], config.HIDDEN)
         x = rms_norm(x, self.norm_w)
         x_last = x[:, -1:, :]  # last position only — see module docstring
-        if len(self.Wlm_shards) > 1:
-            # DFC's parser mis-parses a normalization node with >1 direct
-            # consumer (confirmed: the ONNX graph has exactly one `/Mul_1`
-            # node here, but DFC's HN builder reports N duplicate
-            # input_shapes on it when N shard matmuls all read it directly
-            # — see docs/findings/large-vocab-lm-head-sharding.md). Insert
-            # a trivial EWAdd between the norm and the fan-out so the norm
-            # pattern-match only ever sees one consumer.
-            x_last = x_last + 0.0
-        return tuple(x_last @ w for w in self.Wlm_shards)
+        return x_last @ self.Wlm
 
 
 def main() -> None:
@@ -320,13 +309,10 @@ def main() -> None:
     sin_full = torch.tensor(np.sin(angles), dtype=torch.float32).unsqueeze(0)
     mask_tiled = torch.tensor(config.causal_mask_tiled(1, config.SEQ), dtype=torch.float32)
 
-    output_names = [f"logits_{i}" for i in range(config.LM_HEAD_SHARDS)]
-
     with torch.no_grad():
-        logits_shards = wrapped(
+        logits_wrapped = wrapped(
             torch.tensor(token_embeds), mask_tiled, cos_full, cos_full, sin_full, sin_full
-        )
-        logits_wrapped = torch.cat(logits_shards, dim=-1).numpy()  # (1, 1, VOCAB)
+        ).numpy()  # (1, 1, VOCAB)
     sim = config.cosine(hf_logits_full[:, -1:, :], logits_wrapped)
     print(f"cosine(HF last position, PyTorch reimplementation): {sim:.6f}")
     assert sim > config.COSINE_MIN, "reimplementation diverged from HF"
@@ -337,7 +323,7 @@ def main() -> None:
         (torch.randn(1, config.SEQ, config.HIDDEN), mask_tiled, cos_full, cos_full, sin_full, sin_full),
         str(P.onnx),
         input_names=["inputs_embeds", "attention_mask", "pe_k_cos", "pe_q_cos", "pe_k_sin", "pe_q_sin"],
-        output_names=output_names,
+        output_names=["logits"],
         opset_version=17,
         do_constant_folding=False,
         dynamo=False,  # legacy TorchScript exporter: predictable tracing, validated here
@@ -351,7 +337,7 @@ def main() -> None:
         "pe_k_sin": sin_full.numpy().astype(np.float32),
         "pe_q_sin": sin_full.numpy().astype(np.float32),
     }
-    onnx_logits = np.concatenate(sess.run(output_names, onnx_inputs), axis=-1)
+    onnx_logits = sess.run(["logits"], onnx_inputs)[0]
     sim_onnx = config.cosine(hf_logits_full[:, -1:, :], onnx_logits)
     print(f"cosine(HF last position, ONNX/onnxruntime): {sim_onnx:.6f}")
     assert sim_onnx > config.COSINE_MIN, "ONNX export diverged from HF"

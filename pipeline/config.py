@@ -256,6 +256,7 @@ def paths() -> SimpleNamespace:
         har_resources=workdir / "resources.har",
         har_quantized=workdir / "quantized.har",
         har_convfixed=workdir / "convfixed.har",
+        har_compiled=workdir / "compiled.har",
         hef=workdir / "model.hef",
         hailo_config=workdir / "hailo-config.json",
     )

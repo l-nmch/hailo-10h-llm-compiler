@@ -39,13 +39,15 @@ model scale on larger checkpoints, a second open issue
 Tied embeddings, QK-Norm (Qwen3-style), and explicit `head_dim` are now
 supported and verified through quantization on real checkpoints
 (`nickypro/tinyllama-15M`, `Qwen/Qwen3-0.6B`,
-`tabularisai/Qwen3-0.3B-distil`). Full HEF compilation of a real Qwen3
-checkpoint is currently blocked by a separate, unrelated wall: any
-checkpoint sharing Qwen's ~152K-token vocabulary fails `lm_head`
-placement as this pipeline currently exports it as one monolithic matmul
-— official Hailo HEFs shard it into multiple output convs instead; fix
-identified, not yet implemented
+`tabularisai/Qwen3-0.3B-distil`). A separate, unrelated wall — any
+checkpoint sharing Qwen's ~152K-token vocabulary used to fail `lm_head`
+placement as one monolithic matmul — is now fixed: step 6 generates a
+native `defuse(layer, N)` model-script directive automatically per
+network-group scope, proven on hardware to be byte-identical to the
+unsharded baseline and integrated into the pipeline
 ([findings/large-vocab-lm-head-sharding.md](findings/large-vocab-lm-head-sharding.md)).
+Not yet re-verified at Qwen3's actual `VOCAB=151936` shard count end to
+end through step 6.
 
 ## Stage-by-stage
 
@@ -56,7 +58,7 @@ identified, not yet implemented
 | Graph surgery + resources | ✅ solid on hardware, same emulation caveat | `mask_surgery()`'s `input_layer2` rewiring is correct — it was the prime suspect until hardware evidence ruled it out |
 | Quantization (KV-cache) | ✅ runs (~30 s GPU) | recipe validated by comparison with official `.alls`; no emulator check possible (see below) |
 | Conv repair pass | ✅ kept as safety net | finds 0 issues with the final recipe — its historical cause was ew_add_fusing |
-| HAR → HEF compile | ✅ works (~5–8 min) | both network groups emitted; monolithic lm_head places at optimization_level=0 thanks to the last-position slice |
+| HAR → HEF compile | ✅ works (~5–8 min) | both network groups emitted; lm_head places at optimization_level=0 thanks to the last-position slice, auto-sharded via `defuse()` when VOCAB is large |
 | Notebooks ([../notebooks/](../notebooks/)) | ✅ tested headless + on hardware | `walkthrough.ipynb` executes the full chain green (HEF ≈ 44 MiB); its HEF was probed through the raw `InferModel` API: prefill logits cosine 0.998 with exact argmax, tbt degraded identically to pipeline HEFs |
 | genai.LLM load | ✅ works | HEF passes the full runtime contract (six inputs, embedded resources, config keys) |
 | hailo-ollama serving | ✅ registration + serving work | content-addressed blob store + manifest procedure documented |

@@ -1,14 +1,16 @@
-# Finding 12 — OPEN: large-vocabulary `lm_head` needs sharded output convs
+# Finding 12 — large-vocabulary `lm_head` needs sharded output convs
 
-**Status: fix found and proven on hardware-bound HEF compilation
-(TinyStories proof of concept, post-parse HN-level split — "Fix, attempt
-2" below); not yet integrated into the pipeline or verified on a real
-large-vocab checkpoint end to end.** The first fix attempt (ONNX-side
-sharding) failed on a second, independent DFC parser limitation — see
-"Fix, attempt 1". Currently blocks HEF compilation
-(step 6) for any checkpoint with a large vocabulary — specifically, every
-real Qwen3 checkpoint, since they all share the ~152K-token Qwen
-tokenizer regardless of model size.
+**Status: fixed and integrated into the pipeline.** `s6_compile_hef.py`
+now generates a native `defuse(<layer>, N)` model-script directive
+automatically, for every network-group scope present in the HAR, whenever
+`config.LM_HEAD_SHARDS > 1`. Proven on hardware-bound HEF compilation
+(TinyStories, `VOCAB=32000`, artificially forced to `N=8` shards): compiles
+cleanly through both `__prefill`/`__tbt` scopes, and the resulting HEF's
+output vstream structure is byte-identical to the unsharded baseline (one
+`conv49` output per scope, same shape — the compiler's auto-generated
+concat makes the sharding fully transparent to genai/hailo-ollama). Not
+yet re-verified on a real large-vocab checkpoint (`VOCAB=151936`) end to
+end through step 6 — see "Remaining verification" below.
 
 ## Symptom
 
@@ -159,69 +161,90 @@ Concretely, per shard `i` of `N`:
    layer names, not the `output_layer` wrapper names.
 8. Re-tar.
 
-## Integration (not yet done)
-
-The proof-of-concept lives as an ad-hoc script, not yet integrated into
-the pipeline proper. To land it: add the split as a new step in
-`s3_surgery_and_resources.py` (alongside `mask_surgery()`, gated on
-`config.LM_HEAD_SHARDS > 1` so it's a no-op for every checkpoint
-validated so far), operating on the already-loaded HN dict/params rather
-than a separate tar-extract pass. The ONNX-side sharding code added
-during attempt 1 (`s1_export_onnx.py`'s `Wlm_shards`,
-`LM_HEAD_MAX_SHARD_WIDTH`) should be reverted back to a single monolithic
-`Wlm` — the ONNX/step-1/step-2 layers should go back to always producing
-exactly one output; only the post-parse HN step needs to know about `N`.
-
-## A simpler native alternative exists (`defuse`), but doesn't work out of the box either
+## Fix, attempt 3: the native `defuse` command — WORKS, this is what's shipped
 
 The DFC user guide documents a built-in `defuse(layer, defuse_number)`
 model-script command, specifically for this: *"Defusing splits a logical
 layer into multiple physical layers... Feature defuse: Each physical
 layer calculates part of the output features... Like most mechanisms,
 the defuse mechanism happens automatically, so no user intervention is
-required."* This is precisely our symptom — worth trying before
-committing to the HN-edit approach, since it would need zero pipeline
-surgery and zero runtime-script changes (the compiler re-concatenates the
-physical layers back into one logical output automatically).
+required."* This is precisely our symptom, and needs zero pipeline
+surgery and zero runtime-script changes — the compiler re-concatenates
+the physical layers back into one logical output automatically, so it
+supersedes attempt 2's HN-edit approach entirely.
 
-Tried on the same TinyStories `convfixed.har`, splitting `conv49` (the
-lm_head, `VOCAB=32000`) into 2: `defuse1, defuse2, defuse_c =
-defuse(ts25mpipe/conv49, 2)` (all three return values required — omitting
-the auto-generated concat layer `defuse_c` throws
-`AllocatorScriptParserException`). Loads and starts compiling, but fails
-fast (2s) with a different error than attempt 1: `Auto defused failed
-layer ts25mpipe/defuse1 required too many SCs` (subclusters) — each
-16000-wide half apparently still doesn't fit as constructed, or is
-missing an explicit `compilation_param(..., resources_allocation_
-strategy=manual_scs_selection, number_of_subclusters=N)` override (the
-guide's compilation-parameters section suggests defuse's automatic SC
-allocation may need manual tuning for extreme cases like this). Not
-pursued further given the working alternative below already exists;
-worth revisiting since it would be the cleaner fix if made to work — no
-HN/hdf5 surgery, no runtime-script updates.
+First try, on the same TinyStories `convfixed.har`, splitting `conv49`
+(the lm_head, `VOCAB=32000`) into 2 (`defuse1, defuse2, defuse_c =
+defuse(ts25mpipe/conv49, 2)` — all three return values required, omitting
+the auto-generated concat layer throws `AllocatorScriptParserException`):
+fails fast (2s) with `Auto defused failed layer ts25mpipe/defuse1
+required too many SCs` (subclusters) — each 16000-wide half still doesn't
+fit as constructed. **Retried with `defuse_number=8`** (4000-wide
+shards): compiles successfully (56.90 MiB HEF), and the resulting HEF was
+confirmed byte-for-byte-equivalent on real hardware to the unsharded
+baseline (identical generated text). The user guide's own hint —
+*"num_splits might be overwritten by a larger number due to hw
+limitations"* — matches what was observed: `N=2` too coarse, `N=8` fine.
+No principled formula was derived for the minimum safe `N`; `N=8` is an
+empirically-found value for `VOCAB=32000`, not a general threshold.
 
-## Verification plan (remaining)
+## Integration — done
 
-Two paths forward, either untested end-to-end yet:
+`s6_compile_hef.py` generates the `defuse(...)` directives automatically
+when loading the compiled HAR, gated on `config.LM_HEAD_SHARDS > 1`
+(computed from `VOCAB`/`LM_HEAD_MAX_SHARD_WIDTH` in `config.py`, so it's
+a no-op for every checkpoint validated so far at `VOCAB` around 32000):
 
-1. **`defuse()` native command** — try higher `defuse_number` (more,
-   narrower physical layers) and/or explicit `compilation_param` SC
-   overrides on the defused layers; if it can be made to work, prefer it
-   over the HN-edit approach — it needs zero runtime-script changes since
-   the compiler reconstructs one logical output automatically.
-2. **HN-level split (attempt 2, proven)** — integrate into
-   `s3_surgery_and_resources.py` as described above.
+1. Load the HAR's HN model (`runner.get_hn_model()`) before compiling.
+2. For each active network-group scope (`__prefill`, `__tbt`, plus the
+   base scope with `--include-base-scope`) — **the lm_head layer is
+   duplicated once per scope** by `set_kv_cache_global_params` (confirmed:
+   `ts25mpipe/conv49`, `ts25mpipe__prefill/conv49`,
+   `ts25mpipe__tbt/conv49` all exist as independent HN nodes) — find that
+   scope's output layer whose `original_names` starts with `"logits"`
+   (there are several other output layers per scope, the KV-cache write
+   taps, so filtering by name is required — `hn.get_output_layers()`
+   alone is not enough), then take its sole predecessor
+   (`out_layer.inputs[0]`, already a plain layer-name string) as the
+   layer to defuse.
+3. Emit one `defuse(<scope>/<layer>, N)` line per scope, capturing all
+   `N+1` return values (`N` shards + the auto-generated concat) even
+   though the pipeline never references them by name afterward — DFC
+   requires every return value to be bound or the model script fails to
+   parse.
 
-Whichever lands: recompile `tabularisai/Qwen3-0.3B-distil` (already
+The ONNX-side sharding code from attempt 1 (`s1_export_onnx.py`'s
+`Wlm_shards`, multi-output `torch.onnx.export`) was reverted back to a
+single monolithic `Wlm`/`"logits"` output — `s1`/`s2` always produce
+exactly one lm_head output now; only `s6` needs to know about `N`, and
+only at compile time via a model-script directive, not an export-time
+graph shape.
+
+**Verified through the full integration** (not just the standalone proof
+above): ran `s6_compile_hef.py --workdir <tinystories-workdir>` with
+`LM_HEAD_SHARDS` forced to 8 in `run_config.json` — the script correctly
+found and defused `conv49` in both `__prefill` and `__tbt` scopes,
+compiled cleanly (43.60 MiB, matching the unsharded 43.94 MiB baseline
+closely), and `hailo_platform.HEF(...).get_output_vstream_infos()` on the
+result confirmed each scope still exposes exactly one `conv49` output at
+the full `(1, 1, 32000)` shape — the sharding is fully invisible past
+compile time, exactly as the `defuse` mechanism promises. A default
+(`LM_HEAD_SHARDS=1`) regression run on the same checkpoint was also
+re-verified unaffected (identical 43.94 MiB HEF, no `defuse` lines
+emitted).
+
+## Remaining verification
+
+Not yet done: recompile `tabularisai/Qwen3-0.3B-distil` (already
 validated correct through step 4 quantization with the *unsharded*
-`lm_head` — see the `head_dim` commit) through step 6, confirm the HEF
-compiles at `VOCAB=151936`'s actual shard count (5, not the 2 used in the
-TinyStories proof of concept), then test base-scope generation on
-hardware for coherent output, same bar used throughout this project
-(`docs/status.md`'s "real English, cosine ≈ 0.99"). If the HN-edit
-approach is what lands, runtime scripts
-(`runtime/diagnostics/generate_base_scope.py`, `runtime/genai_generate.py`,
-hailo-ollama serving path) still need updating to gather `N` outputs and
-concatenate before argmax/top-k — untested so far, the TinyStories proof
-of concept was only verified through HEF compilation, not hardware
-inference. The `defuse()` path would not need this runtime-script work.
+`lm_head` — see the `head_dim` commit) through step 6 at its real
+`VOCAB=151936` shard count, confirm the HEF compiles, then test base-scope
+generation on hardware for coherent output, same bar used throughout this
+project (`docs/status.md`'s "real English, cosine ≈ 0.99"). Also open:
+whether `LM_HEAD_MAX_SHARD_WIDTH=32000` (implying `ceil(151936/32000) =
+5` shards for Qwen3) is actually wide enough — the empirical evidence so
+far only confirms `N=2` fails and `N=8` works at `VOCAB=32000` (4000-wide
+shards); `N=5` at `VOCAB=151936` implies ~30K-wide shards, close to the
+`N=2` failure's 16000-wide shards in absolute terms but a different
+vocabulary, so this needs its own empirical check rather than assuming
+the TinyStories result transfers directly.
