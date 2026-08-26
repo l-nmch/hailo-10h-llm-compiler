@@ -168,7 +168,12 @@ def load(
     nhead = hf_config.num_attention_heads
     nkvhead = getattr(hf_config, "num_key_value_heads", None) or nhead
     hidden = hf_config.hidden_size
-    hd = hidden // nhead
+    # Some architectures (Qwen3) declare head_dim explicitly, independent of
+    # hidden/nhead (e.g. Qwen3-0.6B: hidden=1024, nhead=16 -> 64, but
+    # head_dim=128). Trust the explicit field when present; every downstream
+    # RoPE/GQA/QK-Norm matrix is built from config.HD, so this one line is
+    # the only place that needs to know the difference.
+    hd = getattr(hf_config, "head_dim", None) or (hidden // nhead)
 
     resolved = {
         "MODEL_ID": model_id,
