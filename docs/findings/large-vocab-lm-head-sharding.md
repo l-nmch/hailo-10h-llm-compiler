@@ -1,9 +1,11 @@
 # Finding 12 — OPEN: large-vocabulary `lm_head` needs sharded output convs
 
-**Status: root cause identified from official HEF structure; fix not yet
-implemented.** Blocks HEF compilation (step 6) for any checkpoint with a
-large vocabulary — specifically, every real Qwen3 checkpoint, since they
-all share the ~152K-token Qwen tokenizer regardless of model size.
+**Status: root cause identified from official HEF structure; first fix
+attempt (ONNX-side sharding) failed on a second, independent DFC parser
+limitation — see "Fix, attempt 1" below.** Blocks HEF compilation
+(step 6) for any checkpoint with a large vocabulary — specifically, every
+real Qwen3 checkpoint, since they all share the ~152K-token Qwen
+tokenizer regardless of model size.
 
 ## Symptom
 
@@ -70,23 +72,74 @@ independently-placed chunks. This project's exporter has no equivalent
 sharding logic, so it hits the same placement wall official tooling
 avoids by design.
 
-## Fix (not yet implemented)
+## Fix, attempt 1 (ONNX-side sharding): tried, does not work
 
-Shard `Wlm` into `N` column-blocks (e.g. matching the official ~38K chunk
-width, or whatever this hardware's placer reliably accepts — needs a
-determined safe threshold, not just copying "4" blindly) at export time:
-`N` separate `x @ Wlm_i` matmuls instead of one, each becoming its own
-ONNX/HN output node. Concatenation back into a single logits vector
-happens host-side in the runtime scripts
-(`runtime/diagnostics/generate_base_scope.py`,
-`runtime/genai_generate.py`, hailo-ollama serving path) — all of which
-currently assume a single output tensor and need updating to gather `N`
-outputs and concatenate before argmax/top-k.
+First attempt: shard `Wlm` into `N` column-blocks at export time (`N`
+separate `x @ Wlm_i` matmuls in `ExportableModelWithHead.forward()`,
+`N` separate ONNX/HN output nodes) — implemented in `s1_export_onnx.py`.
+This broke step 4 (quantization) with a new, different error:
+
+```
+UnsupportedModelError: Unexpected input_shapes at normalization layer
+<scope>/mul_and_add71 (translated from /Mul_1),
+input_shapes=[[-1, 1, 1, HIDDEN]] * N
+```
+
+`mul_and_add71` is the final `rms_norm`'s weight-multiply, translated
+from a single ONNX node named `/Mul_1`. **Confirmed this is not an ONNX
+export artifact**: inspected `model.onnx` directly with the `onnx`
+Python package — there is exactly one `/Mul_1` node, with exactly 2
+inputs (`x`, `norm_w`) and exactly one direct consumer (the
+last-position `Slice`). Even after inserting an explicit no-op
+(`x_last + 0.0`) between the slice and the `N` shard matmuls specifically
+to give the fan-out point its own distinct node, the resulting ONNX graph
+is provably clean — one linear chain down to the inserted `Add`, which
+then correctly fans out to `N` separate `MatMul` nodes, no duplication
+anywhere — and DFC produced **the exact same error, byte-for-byte**,
+including the `mul_and_add71` layer name. This rules out the ONNX graph
+as the cause entirely: the duplication happens inside DFC's own
+translator, while it builds the HN graph from `N` declared end nodes
+(`logits_0`...`logits_{N-1}`) that share a deep common ancestor. Walking
+backward from each end node independently appears to (re)traverse and
+duplicate every shared upstream node — including ones far removed from
+the fan-out point, like the final normalization — rather than recognizing
+already-visited shared nodes. This looks like a genuine DFC parser
+limitation with multi-output graphs sharing deep ancestry, not something
+fixable from the ONNX-export side.
+
+The `x_last + 0.0` insertion and the `if len(self.Wlm_shards) > 1`
+conditional are still in `s1_export_onnx.py` as of this writing — reverted
+attempt, kept a no-op for the (unsharded) `N == 1` common case pending a
+decision on how to proceed. **Sharding is not currently functional.**
+
+## Fix, attempt 2 (not yet tried): shard after parse, at the HN level
+
+Rather than asking DFC's ONNX translator to build a multi-output graph
+from scratch (attempt 1's failure mode), parse the model normally with
+its original single monolithic `lm_head` matmul — a graph shape this
+translator already handles correctly, single end node, no duplication —
+then perform the split as a **post-parse HN edit**, the same technique
+`s3_surgery_and_resources.py`'s `mask_surgery()` already uses successfully
+for the attention-mask rewiring: load the parsed HN, locate the final
+matmul/conv layer, replace it with `N` smaller conv layers each holding a
+column-slice of the original weight matrix, wire each as its own
+`OutputLayer`, save. This sidesteps DFC's ONNX-to-HN translation path
+for the multi-output case entirely — the translator never sees more than
+one end node — at the cost of needing to understand and replicate the
+DFC-internal `.hn` layer/weight format for a conv layer directly (more
+invasive than `mask_surgery()`'s pure rewiring, which never had to
+fabricate new layers from scratch).
 
 ## Verification plan
 
-Once implemented: recompile `tabularisai/Qwen3-0.3B-distil` (already
-validated correct through step 4 quantization — see the `head_dim`
-commit) through step 6 and confirm the HEF compiles; then test base-scope
-generation on hardware for coherent output, same bar used throughout this
-project (`docs/status.md`'s "real English, cosine ≈ 0.99").
+Once a working sharding mechanism exists (attempt 2 or otherwise):
+recompile `tabularisai/Qwen3-0.3B-distil` (already validated correct
+through step 4 quantization with the *unsharded* `lm_head` — see the
+`head_dim` commit; step 4 with `N==1` still works, this finding only
+blocks the actual large-`VOCAB` case) through step 6 and confirm the HEF
+compiles; then test base-scope generation on hardware for coherent
+output, same bar used throughout this project (`docs/status.md`'s "real
+English, cosine ≈ 0.99"). Runtime scripts
+(`runtime/diagnostics/generate_base_scope.py`, `runtime/genai_generate.py`,
+hailo-ollama serving path) still need updating regardless of which fix
+lands, to gather `N` outputs and concatenate before argmax/top-k.

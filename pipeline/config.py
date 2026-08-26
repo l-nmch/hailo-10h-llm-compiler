@@ -58,6 +58,15 @@ ROPE_THETA = 10000.0
 RMS_EPS = 1e-6
 VOCAB = 32000
 
+# The compiled lm_head matmul ([HIDDEN, VOCAB]) fails HEF placement as one
+# op once VOCAB is large enough (confirmed: fails at 151936, fine at 32000
+# and below) -- see docs/findings/large-vocab-lm-head-sharding.md. Shard
+# it into ceil(VOCAB / LM_HEAD_MAX_SHARD_WIDTH) equal-width column blocks,
+# each its own output node, concatenated host-side. 1 shard (the common
+# case) is functionally identical to the old single-matmul export.
+LM_HEAD_MAX_SHARD_WIDTH = 32000
+LM_HEAD_SHARDS = 1
+
 # Sequence geometry. SEQ is both the parse/calibration length of the base
 # scope and the total KV-cache size (the pipeline requires CACHE_SIZE == SEQ;
 # the __prefill scope runs at PREFILL_SIZE positions). Not derivable from
@@ -187,6 +196,7 @@ def load(
         "ROPE_THETA": float(getattr(hf_config, "rope_theta", 10000.0)),
         "RMS_EPS": float(getattr(hf_config, "rms_norm_eps", 1e-6)),
         "VOCAB": hf_config.vocab_size,
+        "LM_HEAD_SHARDS": -(-hf_config.vocab_size // LM_HEAD_MAX_SHARD_WIDTH),  # ceil div
         "SEQ": seq if seq is not None else SEQ,
         "PREFILL_SIZE": prefill_size if prefill_size is not None else PREFILL_SIZE,
         "CACHE_SIZE": seq if seq is not None else CACHE_SIZE,  # MUST equal SEQ

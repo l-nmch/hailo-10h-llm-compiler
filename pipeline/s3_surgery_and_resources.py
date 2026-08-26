@@ -291,7 +291,10 @@ def main() -> None:
     }
     with runner.infer_context(InferenceContext.SDK_NATIVE, gpu_policy=DistributionStrategy.SINGLE) as ctx:
         out = runner.infer(ctx, dataset=calib, data_type="np_array", batch_size=1)
-    logits = np.array(out[0] if isinstance(out, list) else out).reshape(1, 1, -1)
+    # Multiple outputs when config.LM_HEAD_SHARDS > 1 — see
+    # docs/findings/large-vocab-lm-head-sharding.md.
+    shards = out if isinstance(out, list) else [out]
+    logits = np.concatenate([np.array(s).reshape(1, 1, -1) for s in shards], axis=-1)
     sim = config.cosine(hf_logits_last, logits)
     print(f"cosine(HF last position, HAR/SDK_NATIVE, post-surgery): {sim:.6f}")
     assert sim > config.COSINE_MIN, "surgery broke model fidelity"
