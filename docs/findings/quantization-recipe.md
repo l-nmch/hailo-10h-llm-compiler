@@ -118,16 +118,43 @@ No SDK patch needed. **Method lesson**: a plausible mechanism read
 straight from SDK source is still a hypothesis until tested — this one
 looked completely coherent and was still wrong.
 
-## Unexploited: Layer Noise Analysis
+## Layer Noise Analysis — confirmed structurally blocked, not just unattempted
 
 DFC ships a `Layer Noise Analysis` checker (source class `HailoQuantAnalyzer`)
 that infers the model both natively and quantized and reports per-layer SNR.
 It's read-only diagnostics — confirmed from the algorithm's own source: it
 computes statistics into a work directory and does not write back into the
-model, so enabling it cannot change the resulting `.Q.HAR`. Never run on
-this project; see [docs/status.md](../status.md) "What would move the
-needle next" for why it's worth doing before the next round on the
-cache-read issue.
+model, so enabling it cannot change the resulting `.Q.HAR`.
+
+Earlier notes in this project described this as simply "never run" —
+that undersold the finding. The real CLI entry point is `hailo
+analyze-noise <har-path> --data-path <data-path>` (found in the official
+DFC user guide; an internal `model_optimization_config(checker_cfg,
+policy=enabled, analyze_mode=advanced)` model-script directive also
+exists but was never the actual blocker). **Directly tried on this
+project's `quantized.har`**: it fails with the exact same `TypeError:
+'in <string>' requires string as left operand, not NoneType` traced
+through `Cache.__init__` -> `_get_prefill_size` already documented below
+and in `sdk-behavior-notes.md`'s "Quantized emulator is structurally
+broken on KV-cache graphs" — `analyze-noise` calls
+`build_acceleras_model(InferenceContext.SDK_QUANTIZED)` internally,
+the identical code path. Passing `--adapter-name
+<scope>__prefill` (the workaround this project uses elsewhere for the
+same `Cache` bug) does not help — the CLI flag does not appear to reach
+`lora_adapter_name` correctly, and even if it did, the deeper structural
+`SDK_QUANTIZED` bug on KV-cache graphs (shape mismatch in
+`__prefill/matmul1`, see `sdk-behavior-notes.md`) would still block it.
+
+**Conclusion: Layer Noise Analysis is not achievable on this project's
+KV-cache graphs through any entry point (Python API or CLI) until the
+underlying `SDK_QUANTIZED`/`Cache` bug is fixed by Hailo — not a
+configuration or recipe problem on this project's side.** Revisit only
+if a future DFC release fixes the `Cache` construction bug, or if
+someone finds a way to run it against the base (non-KV-cache-duplicated)
+scope specifically — untried, and the same `Cache.__init__` requires a
+`__prefill`/`__tbt` adapter name even for base-scope-only graphs (see
+the base-scope `SDK_QUANTIZED` attempt in
+`sdk-native-cosine-drift.md`).
 
 ## What could NOT be verified locally
 

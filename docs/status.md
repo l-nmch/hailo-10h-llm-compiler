@@ -101,15 +101,16 @@ the open findings):
    than INT4, `calibset_size` increase made it worse not better; root
    cause still open (see the "Downstream symptom" section of
    [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
-6. Run DFC's **Layer Noise Analysis** checker
-   (`model_optimization_config(checker_cfg, layer_noise_analysis, ...)`,
-   or the algorithm's own name inside the SDK) during step 4. It's a
-   read-only diagnostic — it infers the model both native and quantized
-   and reports per-layer SNR, without altering the resulting `.Q.HAR` —
-   never run on this project so far (the directive name tried,
-   `layer_noise_analysis`, is confirmed wrong — `'layer_noise_analysis'
-   is not a valid PostQuantizationFeature`; correct SDK syntax still
-   unknown).
+~~6. Run DFC's **Layer Noise Analysis** checker~~ — **ruled out, not just
+   unattempted**. The real CLI (`hailo analyze-noise <har> --data-path
+   <data>`, confirmed from the official user guide) was tried directly
+   against this project's `quantized.har` and fails with the exact same
+   `Cache`/`SDK_QUANTIZED` bug already blocking every other
+   post-quantization emulation path on this project's KV-cache graphs
+   (see [findings/quantization-recipe.md](findings/quantization-recipe.md)'s
+   "Layer Noise Analysis" section). Not achievable through any entry
+   point until Hailo fixes the underlying SDK bug — drop from this list
+   until that changes.
 
 ## Provenance note
 
