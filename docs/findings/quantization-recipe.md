@@ -118,7 +118,7 @@ No SDK patch needed. **Method lesson**: a plausible mechanism read
 straight from SDK source is still a hypothesis until tested — this one
 looked completely coherent and was still wrong.
 
-## Layer Noise Analysis — confirmed structurally blocked, not just unattempted
+## Layer Noise Analysis — works on a non-KV-cache-duplicated HAR, blocked only when KV-cache duplication is applied
 
 DFC ships a `Layer Noise Analysis` checker (source class `HailoQuantAnalyzer`)
 that infers the model both natively and quantized and reports per-layer SNR.
@@ -131,30 +131,49 @@ that undersold the finding. The real CLI entry point is `hailo
 analyze-noise <har-path> --data-path <data-path>` (found in the official
 DFC user guide; an internal `model_optimization_config(checker_cfg,
 policy=enabled, analyze_mode=advanced)` model-script directive also
-exists but was never the actual blocker). **Directly tried on this
-project's `quantized.har`**: it fails with the exact same `TypeError:
-'in <string>' requires string as left operand, not NoneType` traced
-through `Cache.__init__` -> `_get_prefill_size` already documented below
-and in `sdk-behavior-notes.md`'s "Quantized emulator is structurally
-broken on KV-cache graphs" — `analyze-noise` calls
-`build_acceleras_model(InferenceContext.SDK_QUANTIZED)` internally,
-the identical code path. Passing `--adapter-name
-<scope>__prefill` (the workaround this project uses elsewhere for the
-same `Cache` bug) does not help — the CLI flag does not appear to reach
-`lora_adapter_name` correctly, and even if it did, the deeper structural
-`SDK_QUANTIZED` bug on KV-cache graphs (shape mismatch in
-`__prefill/matmul1`, see `sdk-behavior-notes.md`) would still block it.
+exists but was never the actual blocker).
 
-**Conclusion: Layer Noise Analysis is not achievable on this project's
-KV-cache graphs through any entry point (Python API or CLI) until the
-underlying `SDK_QUANTIZED`/`Cache` bug is fixed by Hailo — not a
-configuration or recipe problem on this project's side.** Revisit only
-if a future DFC release fixes the `Cache` construction bug, or if
-someone finds a way to run it against the base (non-KV-cache-duplicated)
-scope specifically — untried, and the same `Cache.__init__` requires a
-`__prefill`/`__tbt` adapter name even for base-scope-only graphs (see
-the base-scope `SDK_QUANTIZED` attempt in
-`sdk-native-cosine-drift.md`).
+**First attempt, on this project's standard `quantized.har` (with
+`set_kv_cache_global_params` applied, `__prefill`/`__tbt` scopes
+present)**: fails with `TypeError: 'in <string>' requires string as left
+operand, not NoneType` traced through `Cache.__init__` ->
+`_get_prefill_size` — `analyze-noise` calls
+`build_acceleras_model(InferenceContext.SDK_QUANTIZED)` internally, the
+same broken code path already documented in "Quantized emulator is
+structurally broken on KV-cache graphs" below. `--adapter-name
+<scope>__prefill` does not help — the CLI flag does not appear to reach
+`lora_adapter_name` correctly.
+
+**Second attempt (correcting the first pass's conclusion): quantized the
+same checkpoint a second time with the identical recipe below, minus the
+one line `set_kv_cache_global_params(...)`** (no `__prefill`/`__tbt`
+duplication at all — a graph this project would never actually ship,
+since it has no KV-cache, but useful specifically to isolate whether the
+`Cache` bug is the *only* blocker). Re-ran `analyze-noise` against this
+HAR with a correctly-shaped 6-input calibration `.npz`
+(`{scope}/input_layer1..6`, matching `build_calibration()`'s layout
+below) — **it gets past the `Cache` bug entirely** and reaches real
+per-layer noise computation (`LATModel.call()`, comparing native vs.
+quantized activations layer by layer), before hitting a *different*,
+unrelated error: a shape mismatch (`256` vs `272`) between native and
+quantized activations at `conv11` — plausibly a GQA/`repeat_kv`-related
+discrepancy, not investigated further. This is real, if incomplete,
+progress: it proves the `Cache`/`SDK_QUANTIZED` bug (confirmed elsewhere
+as blocking *all* post-quantization emulation on KV-cache graphs) is
+specifically about `set_kv_cache_global_params`'s scope duplication, not
+some more general property of this project's graphs.
+
+**Revised conclusion**: Layer Noise Analysis is achievable on a
+quantized HAR *without* KV-cache duplication, but this project's
+standard recipe always applies `set_kv_cache_global_params` (the whole
+point of this pipeline). Running it meaningfully on the shipped
+KV-cache-duplicated graph remains blocked by the `Cache` bug, and even
+without that bug, a second, real shape-mismatch issue (`conv11`,
+256 vs 272) surfaced once the tool actually ran — not yet resolved.
+Useful as a diagnostic on the *non-KV-cache* base architecture (e.g. to
+sanity-check a new checkpoint's per-layer quantization sensitivity
+before ever touching KV-cache duplication), not on the final shipped
+recipe.
 
 ## What could NOT be verified locally
 

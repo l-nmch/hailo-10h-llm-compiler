@@ -101,16 +101,19 @@ the open findings):
    than INT4, `calibset_size` increase made it worse not better; root
    cause still open (see the "Downstream symptom" section of
    [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
-~~6. Run DFC's **Layer Noise Analysis** checker~~ — **ruled out, not just
-   unattempted**. The real CLI (`hailo analyze-noise <har> --data-path
-   <data>`, confirmed from the official user guide) was tried directly
-   against this project's `quantized.har` and fails with the exact same
-   `Cache`/`SDK_QUANTIZED` bug already blocking every other
-   post-quantization emulation path on this project's KV-cache graphs
-   (see [findings/quantization-recipe.md](findings/quantization-recipe.md)'s
-   "Layer Noise Analysis" section). Not achievable through any entry
-   point until Hailo fixes the underlying SDK bug — drop from this list
-   until that changes.
+6. Run DFC's **Layer Noise Analysis** checker (`hailo analyze-noise <har>
+   --data-path <data>`, confirmed from the official user guide). Blocked
+   by the `Cache`/`SDK_QUANTIZED` bug on this project's standard
+   KV-cache-duplicated `quantized.har` — but confirmed working (reaches
+   real per-layer noise computation) on a HAR quantized *without*
+   `set_kv_cache_global_params`, before hitting a separate, real
+   shape-mismatch error (`conv11`, 256 vs 272 — plausibly GQA/`repeat_kv`
+   related, not yet investigated). See
+   [findings/quantization-recipe.md](findings/quantization-recipe.md)'s
+   "Layer Noise Analysis" section for the full evidence and the exact
+   no-KV-cache recipe used. Next step: chase the `conv11` shape mismatch
+   specifically — it's the one remaining blocker on the no-KV-cache path,
+   and understanding it might also inform the KV-cache `Cache` bug itself.
 
 ## Provenance note
 
