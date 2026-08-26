@@ -1,8 +1,11 @@
 # Finding 12 — OPEN: large-vocabulary `lm_head` needs sharded output convs
 
-**Status: root cause identified from official HEF structure; first fix
-attempt (ONNX-side sharding) failed on a second, independent DFC parser
-limitation — see "Fix, attempt 1" below.** Blocks HEF compilation
+**Status: fix found and proven on hardware-bound HEF compilation
+(TinyStories proof of concept, post-parse HN-level split — "Fix, attempt
+2" below); not yet integrated into the pipeline or verified on a real
+large-vocab checkpoint end to end.** The first fix attempt (ONNX-side
+sharding) failed on a second, independent DFC parser limitation — see
+"Fix, attempt 1". Currently blocks HEF compilation
 (step 6) for any checkpoint with a large vocabulary — specifically, every
 real Qwen3 checkpoint, since they all share the ~152K-token Qwen
 tokenizer regardless of model size.
@@ -112,7 +115,7 @@ conditional are still in `s1_export_onnx.py` as of this writing — reverted
 attempt, kept a no-op for the (unsharded) `N == 1` common case pending a
 decision on how to proceed. **Sharding is not currently functional.**
 
-## Fix, attempt 2 (not yet tried): shard after parse, at the HN level
+## Fix, attempt 2: shard after parse, at the HN level — WORKS
 
 Rather than asking DFC's ONNX translator to build a multi-output graph
 from scratch (attempt 1's failure mode), parse the model normally with
@@ -120,26 +123,66 @@ its original single monolithic `lm_head` matmul — a graph shape this
 translator already handles correctly, single end node, no duplication —
 then perform the split as a **post-parse HN edit**, the same technique
 `s3_surgery_and_resources.py`'s `mask_surgery()` already uses successfully
-for the attention-mask rewiring: load the parsed HN, locate the final
-matmul/conv layer, replace it with `N` smaller conv layers each holding a
-column-slice of the original weight matrix, wire each as its own
-`OutputLayer`, save. This sidesteps DFC's ONNX-to-HN translation path
-for the multi-output case entirely — the translator never sees more than
-one end node — at the cost of needing to understand and replicate the
-DFC-internal `.hn` layer/weight format for a conv layer directly (more
-invasive than `mask_surgery()`'s pure rewiring, which never had to
-fabricate new layers from scratch).
+for the attention-mask rewiring. This sidesteps DFC's ONNX-to-HN
+translation path for the multi-output case entirely — the translator
+never sees more than one end node.
 
-## Verification plan
+**Verified working end to end on TinyStories** (artificially split into
+2 shards as a proof of concept — `VOCAB=32000` doesn't need sharding for
+real use, this was purely to validate the mechanism): extracted
+`resources.har`'s tarball, edited `<scope>.hn` directly (JSON) and
+`<scope>.hdf5` directly (the actual weights — `h5py`, datasets named
+`<scope>/<layer>/<param>:0/value`), re-tarred, ran the result through
+steps 4-6 unmodified. **Quantization (step 4) — the exact step attempt 1
+crashed at — completed cleanly.** Compilation (step 6) succeeded on all
+three network groups, HEF written (55.59 MiB, matching the unsharded
+56.20 MiB baseline closely).
 
-Once a working sharding mechanism exists (attempt 2 or otherwise):
-recompile `tabularisai/Qwen3-0.3B-distil` (already validated correct
+Concretely, per shard `i` of `N`:
+
+1. Locate the final matmul/conv layer's HN dict entry (identified by
+   being the sole predecessor of the graph's `output_layer`; original
+   name `/MatMul_4` in this pipeline's export).
+2. Copy its dict, override `output_shapes` to the shard's column width,
+   `original_names` to `["logits_{i}"]`, and `params.kernel_shape`'s last
+   dim.
+3. Slice the real weights out of the `.hdf5` (`kernel[:, :, :, lo:hi]`,
+   `bias[lo:hi]`) and write them under the new shard layer's name.
+4. Add a corresponding `output_layer` dict per shard, wired to the new
+   conv.
+5. Rewire the *predecessor* of the original matmul (e.g. the
+   last-position `slice`) to list all `N` new shard convs as its
+   `output` — this step is easy to miss and produces a validation error
+   (`InvalidHNError: output named ... is not found`) if skipped.
+6. Delete the original matmul and `output_layer` dict entries.
+7. Update `net_params.output_layers_order` — note this lists the *conv*
+   layer names, not the `output_layer` wrapper names.
+8. Re-tar.
+
+## Integration (not yet done)
+
+The proof-of-concept lives as an ad-hoc script, not yet integrated into
+the pipeline proper. To land it: add the split as a new step in
+`s3_surgery_and_resources.py` (alongside `mask_surgery()`, gated on
+`config.LM_HEAD_SHARDS > 1` so it's a no-op for every checkpoint
+validated so far), operating on the already-loaded HN dict/params rather
+than a separate tar-extract pass. The ONNX-side sharding code added
+during attempt 1 (`s1_export_onnx.py`'s `Wlm_shards`,
+`LM_HEAD_MAX_SHARD_WIDTH`) should be reverted back to a single monolithic
+`Wlm` — the ONNX/step-1/step-2 layers should go back to always producing
+exactly one output; only the post-parse HN step needs to know about `N`.
+
+## Verification plan (remaining)
+
+Recompile `tabularisai/Qwen3-0.3B-distil` (already validated correct
 through step 4 quantization with the *unsharded* `lm_head` — see the
-`head_dim` commit; step 4 with `N==1` still works, this finding only
-blocks the actual large-`VOCAB` case) through step 6 and confirm the HEF
-compiles; then test base-scope generation on hardware for coherent
-output, same bar used throughout this project (`docs/status.md`'s "real
-English, cosine ≈ 0.99"). Runtime scripts
-(`runtime/diagnostics/generate_base_scope.py`, `runtime/genai_generate.py`,
-hailo-ollama serving path) still need updating regardless of which fix
-lands, to gather `N` outputs and concatenate before argmax/top-k.
+`head_dim` commit) through step 6 with the real fix integrated, and
+confirm the HEF compiles at `VOCAB=151936`'s actual shard count (5, not
+the 2 used in the TinyStories proof of concept); then test base-scope
+generation on hardware for coherent output, same bar used throughout this
+project (`docs/status.md`'s "real English, cosine ≈ 0.99"). Runtime
+scripts (`runtime/diagnostics/generate_base_scope.py`,
+`runtime/genai_generate.py`, hailo-ollama serving path) still need
+updating to gather `N` outputs and concatenate before argmax/top-k —
+untested so far, the TinyStories proof of concept was only verified
+through HEF compilation, not hardware inference.
