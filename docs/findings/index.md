@@ -25,6 +25,7 @@ to a detailed write-up with evidence and reproduction pointers.
 | 10 | Compiling encoder-only models (BERT/MiniLM-style) — out of main scope, validated side-path | done, scope note | [encoder-model-keras-registration.md](encoder-model-keras-registration.md) |
 | 11 | **ROOT CAUSE FOUND** — DFC's `SoftmaxOp.call_hw_sim()` ignores the HN's own `groups=NHEAD` metadata, computing one softmax shared across all attention heads instead of per-head; confirmed bit-exact, present on every checkpoint including the original TinyStories default; open question is whether real silicon shares the bug | **top-priority open issue** | [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md) |
 | 12 | Large-vocabulary `lm_head` (e.g. Qwen3's ~152K tokens) fails HEF placement as a single monolithic matmul; fixed with the native `defuse(layer, N)` model-script command, generated automatically by step 6 for every network-group scope — zero runtime-script changes needed | **fixed & integrated**; not yet re-verified at Qwen3's real vocab size | [large-vocab-lm-head-sharding.md](large-vocab-lm-head-sharding.md) |
+| 13 | Real 24-layer checkpoints (`Qwen2.5-0.5B-Instruct`) fail `__tbt` compilation with a deterministic context-partition topology error, independent of lm_head shard count/optimization level/context-switch tuning — a separate, downstream DFC limitation at this scale | **open, deprioritized** | [large-body-multicontext-topology.md](large-body-multicontext-topology.md) |
 
 ## How to read these
 

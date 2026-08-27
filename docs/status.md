@@ -47,7 +47,17 @@ network-group scope, proven on hardware to be byte-identical to the
 unsharded baseline and integrated into the pipeline
 ([findings/large-vocab-lm-head-sharding.md](findings/large-vocab-lm-head-sharding.md)).
 Not yet re-verified at Qwen3's actual `VOCAB=151936` shard count end to
-end through step 6.
+end through step 6 — attempting this on a real 24-layer checkpoint
+(`Qwen2.5-0.5B-Instruct`, a real non-distilled model chosen specifically
+to validate on) surfaced a second, unrelated bug along the way: q/k/v
+projection biases (present on Qwen2-style architectures, absent on
+LLaMA/Qwen3-style ones) were silently dropped by the exporter — fixed
+(now fixed here). Past that fix, a separate, deeper wall was found: a
+deterministic `__tbt` context-partition topology error at this
+checkpoint's scale, independent of lm_head shard count or every
+model-script tuning knob tried
+([findings/large-body-multicontext-topology.md](findings/large-body-multicontext-topology.md)),
+not yet resolved.
 
 ## Stage-by-stage
 

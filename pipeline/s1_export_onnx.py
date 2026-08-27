@@ -134,6 +134,12 @@ class GQALayer(torch.nn.Module):
         self.Wk = torch.nn.Parameter(layer.self_attn.k_proj.weight.detach().T.clone())
         self.Wv = torch.nn.Parameter(layer.self_attn.v_proj.weight.detach().T.clone())
         self.Wo = torch.nn.Parameter(layer.self_attn.o_proj.weight.detach().T.clone())
+        # Qwen2-style architectures carry biases on q/k/v (never on o_proj) --
+        # LLaMA/Qwen3-style ones don't declare .bias at all (None). Zero
+        # tensors keep forward() a single unconditional add either way.
+        self.bq = torch.nn.Parameter(self._bias_or_zero(layer.self_attn.q_proj))
+        self.bk = torch.nn.Parameter(self._bias_or_zero(layer.self_attn.k_proj))
+        self.bv = torch.nn.Parameter(self._bias_or_zero(layer.self_attn.v_proj))
         self.ln1_w = torch.nn.Parameter(layer.input_layernorm.weight.detach().clone())
         self.ln2_w = torch.nn.Parameter(layer.post_attention_layernorm.weight.detach().clone())
         self.Wgate = torch.nn.Parameter(layer.mlp.gate_proj.weight.detach().T.clone())
@@ -150,14 +156,20 @@ class GQALayer(torch.nn.Module):
             self.q_norm_w = torch.nn.Parameter(q_norm.weight.detach().clone() @ matrices.tile_q)
             self.k_norm_w = torch.nn.Parameter(k_norm.weight.detach().clone() @ matrices.tile_k)
 
+    @staticmethod
+    def _bias_or_zero(proj: torch.nn.Linear) -> torch.Tensor:
+        if proj.bias is not None:
+            return proj.bias.detach().clone()
+        return torch.zeros(proj.out_features)
+
     def forward(self, x, attention_mask_tiled, k_cos_t, q_cos_t, k_sin_t, q_sin_t):
         residual = x
         h = rms_norm(x, self.ln1_w)
         b, s, _ = h.shape
 
-        q = h @ self.Wq
-        k = h @ self.Wk
-        v = h @ self.Wv
+        q = h @ self.Wq + self.bq
+        k = h @ self.Wk + self.bk
+        v = h @ self.Wv + self.bv
         if self.qk_norm:
             q = rms_norm_headwise(q, self.q_norm_w, self.m.head_seg_q, config.HD)
             k = rms_norm_headwise(k, self.k_norm_w, self.m.head_seg_k, config.HD)
