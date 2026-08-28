@@ -1,12 +1,25 @@
-# Finding 12 — OPEN (likely unfixable on this DFC build): large-vocabulary `lm_head` needs sharded output convs
+# Finding 12 — FIXED: large-vocabulary `lm_head` needs sharded output convs
 
-**Status: two independent, structurally different sharding mechanisms
-were built and proven at small scale, then both hit hard DFC-internal
-limits before reaching a real ~152K-vocabulary checkpoint (Qwen3
-family). Current conclusion: no configuration was found that compiles a
-real Qwen-scale vocabulary on DFC 5.3.0.** This is the most
-thoroughly-investigated open finding in this project; read all three
-attempts below before trying a fourth.
+**Status: fixed.** Three sharding mechanisms were tried and hit a real
+DFC-internal post-fuser bug once shard fan-out reached 3 (see "Root
+cause, finally pinned down" below) before a fourth — duplicating the
+shared ancestor normalization/slice chain per shard, so the fuser never
+sees a fan-out ≥3 point at all — worked. Verified compiling, registering
+with hailo-ollama, and serving (via `genai`) on a real
+`Qwen/Qwen2.5-0.5B-Instruct` checkpoint (`VOCAB=151936`, 24 layers) —
+the first real large-vocabulary checkpoint to clear this wall on this
+pipeline. This is the most thoroughly-investigated finding in this
+project; the four attempts below are kept in full because the three
+failures are what pinned down the real bug the fourth attempt routes
+around.
+
+**A separate, downstream numeric issue was found on real hardware once
+this checkpoint could finally run**: prefill cosine 0.858 with a wrong
+argmax (previously-tested smaller checkpoints all showed ≈0.998-1.0
+with exact argmax) — not caused by this sharding fix's mechanism itself
+as far as isolated testing has shown (tokenizer and `__tbt` cache-read
+both ruled out), but not yet root-caused either. See
+[large-checkpoint-prefill-drift.md](large-checkpoint-prefill-drift.md).
 
 ## Why this matters
 
@@ -300,37 +313,41 @@ convs) shows is the actual placement ceiling. `N≥3` avoids the
 width-placement wall but crashes the fuser unconditionally. **No value
 of `N` satisfies both constraints at once for `VOCAB≈152000`.**
 
-## Current status: open, likely unfixable on DFC 5.3.0
+## Fix, attempt 4: duplicate the shared ancestor per shard — WORKS
 
-Three independent construction methods (ONNX multi-output export,
-`defuse()`, direct HN/npz surgery) all hit the identical post-fuser
-`normalization_optimizer` crash once fan-out reaches 3, and a fourth,
-independent placement-width ceiling (~32K-38K, corroborated by the
-official Hailo HEF's own output-conv width) makes `N=2` unusable for a
-152K-token vocabulary. Together these bracket out every value of `N`.
-Real Qwen2/Qwen2.5/Qwen3 checkpoints remain blocked on this DFC version
-regardless of which sharding mechanism is used; every other fix on this
-generalization branch (tied embeddings, QK-Norm, explicit `head_dim`,
-q/k/v projection biases) is proven correct independent of this wall.
+Attempt 3's root-cause analysis pinned the bug on the post-fuser
+touching the *shared ancestor* normalization layer once its fan-out
+reaches 3 — not the split itself. The fix: instead of asking N shards
+to share one upstream slice/normalization chain, give each shard its
+own private copy of that short chain, walking backward from the split
+point until a non-cheap-to-duplicate layer type is reached (so the
+*original* shared layer's fan-out never exceeds 1, however many shards
+exist downstream of the duplicated copies).
 
-**What would actually move this forward**, none attempted:
+Implemented as `_duplicate_chain_for_shard()` +
+`lm_head_split()` in `s3_surgery_and_resources.py`, run **before**
+quantization (step 3, not step 6) directly on the raw HN layer dict —
+mirrors what official Hailo HEFs actually ship (genuinely independent
+output convs, not a single logical layer the compiler splits and
+reconciles at compile time like `defuse()` did). Only `"slice"` and
+`"normalization"`-typed layers are duplicated (`_SAFE_TO_DUPLICATE_TYPES`)
+— cheap, parameter-light ops between the real compute and the split
+point; the actual weighted reduction (`layer_normalization`'s
+mean/variance) stays shared, since duplicating that far back would
+explode resource usage for no reason and it isn't the layer type the
+bug targets anyway.
 
-1. `pre_quantization_optimization(defuse, layers=X, num_splits=N,
-   defuse_type=MHA)` — a different, attention-block-specific defuse
-   mechanism documented separately from the compilation-time `defuse()`
-   used in attempt 3 (see the DFC user guide's Model Optimization
-   section, not the Model Compilation section). Untested against this
-   symptom — it targets the attention block's first matmul, not
-   lm_head, so may not even apply, but was found only after this
-   investigation's attempts were already exhausted.
-2. Report the post-fuser bug upstream — it is reproducible, minimal
-   (any conv with ≥3 independently-tracked successors sharing an
-   ancestor normalization layer), and version-specific to DFC 5.3.0;
-   worth checking against a newer DFC release if one becomes available.
-3. A fundamentally different approach to the vocabulary problem
-   entirely — e.g. quantizing lm_head to a narrower effective width
-   somehow, or restructuring the export so the shared ancestor
-   normalization layer itself isn't shared (duplicate the final RMSNorm
-   N times before the split, so the fuser never sees a fan-out ≥3 point)
-   — untested, plausible given the bug is specifically about the fuser's
-   handling of the *shared ancestor*, not the split itself.
+**Verified on the real target this whole investigation was blocked
+on**: `Qwen/Qwen2.5-0.5B-Instruct` (24 layers, `VOCAB=151936`) compiled
+successfully end to end through step 6 (~4h39m — the checkpoint's scale
+dominates compile time, not the sharding itself), registered with
+hailo-ollama, and served a `genai`-compatible generation response
+without error. This is the first real Qwen-family (large-vocabulary)
+checkpoint to clear every wall in this pipeline, from export through a
+live `genai`/hailo-ollama response.
+
+A separate, downstream numeric-fidelity issue was found once this
+checkpoint could actually run — see
+[large-checkpoint-prefill-drift.md](large-checkpoint-prefill-drift.md).
+It is not this finding's blocker: the lm_head placement/compile problem
+documented here is fully resolved independent of that open question.

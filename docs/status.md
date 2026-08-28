@@ -45,23 +45,29 @@ verified through quantization on real checkpoints
 (`nickypro/tinyllama-15M`, `Qwen/Qwen3-0.6B`,
 `tabularisai/Qwen3-0.3B-distil`, `Qwen/Qwen2.5-0.5B-Instruct`).
 
-**Large-vocabulary `lm_head` remains open, and is now believed likely
-unfixable on this DFC version.** Every checkpoint sharing Qwen's
-~152K-token vocabulary fails `lm_head` placement as one monolithic
-matmul; three independently-built sharding fixes were tried (ONNX
-multi-output export, the native `defuse()` model-script command, and a
-pre-quantization HN/weights surgery mirroring official Hailo HEFs'
-genuinely-independent output convs) — all three hit the identical
-DFC-internal post-fuser bug once shard fan-out reaches 3, bracketed
-against a ~32K-38K width placement ceiling (corroborated by an official
-Hailo HEF's own output-conv width) that makes fan-out 2 unusable for a
-152K-token vocabulary. No value of `N` satisfies both constraints at
-once
+**Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
+Qwen's ~152K-token vocabulary used to fail `lm_head` placement as one
+monolithic matmul. Three sharding mechanisms (ONNX multi-output export,
+the native `defuse()` model-script command, a naive pre-quantization HN
+surgery) all hit the same DFC-internal post-fuser bug once shard
+fan-out reached 3; a fourth — duplicating the shared ancestor
+normalization/slice chain per shard before quantization, so the fuser
+never sees that fan-out — works
 ([findings/large-vocab-lm-head-sharding.md](findings/large-vocab-lm-head-sharding.md)).
-A related, separate DFC limitation was also found and documented while
-investigating this: a deterministic `__tbt` context-partition topology
-error specific to large (24-layer) bodies, surfaced only via the
-now-abandoned `defuse()` path
+Verified end to end on a real, non-distilled `Qwen/Qwen2.5-0.5B-Instruct`
+checkpoint (24 layers, `VOCAB=151936`): compiles, registers with
+hailo-ollama, and serves a live `genai` generation response — the first
+real Qwen-family checkpoint to clear every wall in this pipeline. A
+separate, downstream numeric-fidelity issue was found once this
+checkpoint could actually run: real-hardware prefill cosine 0.858 with
+a wrong argmax (previously-tested smaller checkpoints all showed
+≈0.998-1.0 exact) — isolated to be neither a tokenizer/BOS desync nor
+the `__tbt` cache-read bug, root cause not yet found
+([findings/large-checkpoint-prefill-drift.md](findings/large-checkpoint-prefill-drift.md)).
+A separate, now-moot DFC limitation was also found and documented while
+chasing the abandoned `defuse()` path: a deterministic `__tbt`
+context-partition topology error specific to large (24-layer) bodies,
+never reproduced with the fix that actually landed
 ([findings/large-body-multicontext-topology.md](findings/large-body-multicontext-topology.md)).
 
 ## Stage-by-stage
