@@ -51,6 +51,18 @@ are now supported and verified through quantization on real checkpoints
 `tabularisai/Qwen3-0.3B-distil`, `Qwen/Qwen2.5-0.5B-Instruct`,
 `Locutusque/TinyMistral-248M`).
 
+**A third real-hardware fidelity gap was found, this time on
+base-scope (no-cache) generation** — previously this project's control
+test for "is the compiled model itself sound", always coherent before
+now. `TinyMistral-248M`'s base-scope output degenerates to constant
+token repetition; the identical prompt through the float32 HF reference
+produces real, coherent English, ruling out a weak/undertrained
+checkpoint as the explanation. This checkpoint is also the first to
+land on the lm_head `N=2` shard-count case specifically (every other
+sharded checkpoint tested needed `N≥5`) — not yet confirmed as the
+cause, but flagged as the most likely candidate
+([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
+
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
 Qwen's ~152K-token vocabulary used to fail `lm_head` placement as one
 monolithic matmul. Three sharding mechanisms (ONNX multi-output export,

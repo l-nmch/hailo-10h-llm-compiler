@@ -59,6 +59,18 @@ Output text was incoherent but with recognizable English word fragments
 checkpoint in this project, not a new issue introduced by this
 architecture.
 
+**Base-scope (no-cache) generation, however, does show a new problem on
+this checkpoint** — unlike `__tbt` above, this was expected to be
+coherent (it's this project's control test proving the compiled model
+itself is sound, no cache involved). It degenerates to repetition
+instead, while the same prompt on float32 HF is coherent. Not caused by
+this finding's subject (sliding-window support needs no graph changes,
+so it can't be the mask itself) — most likely connected to this
+checkpoint being the first to land on the lm_head `N=2` shard-count
+case. See [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)
+for the full investigation; this doesn't change sliding-window
+attention's status above.
+
 ## What's not yet covered
 
 - **This run's `CACHE_SIZE` (24, the pipeline's default) never exceeded
