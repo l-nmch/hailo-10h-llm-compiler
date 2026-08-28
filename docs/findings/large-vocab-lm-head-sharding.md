@@ -1,16 +1,22 @@
-# Finding 12 — large-vocabulary `lm_head` needs sharded output convs
+# Finding 12 — OPEN (likely unfixable on this DFC build): large-vocabulary `lm_head` needs sharded output convs
 
-**Status: fixed and integrated into the pipeline.** `s6_compile_hef.py`
-now generates a native `defuse(<layer>, N)` model-script directive
-automatically, for every network-group scope present in the HAR, whenever
-`config.LM_HEAD_SHARDS > 1`. Proven on hardware-bound HEF compilation
-(TinyStories, `VOCAB=32000`, artificially forced to `N=8` shards): compiles
-cleanly through both `__prefill`/`__tbt` scopes, and the resulting HEF's
-output vstream structure is byte-identical to the unsharded baseline (one
-`conv49` output per scope, same shape — the compiler's auto-generated
-concat makes the sharding fully transparent to genai/hailo-ollama). Not
-yet re-verified on a real large-vocab checkpoint (`VOCAB=151936`) end to
-end through step 6 — see "Remaining verification" below.
+**Status: two independent, structurally different sharding mechanisms
+were built and proven at small scale, then both hit hard DFC-internal
+limits before reaching a real ~152K-vocabulary checkpoint (Qwen3
+family). Current conclusion: no configuration was found that compiles a
+real Qwen-scale vocabulary on DFC 5.3.0.** This is the most
+thoroughly-investigated open finding in this project; read all three
+attempts below before trying a fourth.
+
+## Why this matters
+
+Every real Qwen2/Qwen2.5/Qwen3 checkpoint shares the ~152K-token Qwen
+tokenizer regardless of model size, so this blocks the entire Qwen
+family end-to-end on this pipeline, independent of every other fix
+(QK-Norm, `head_dim`, tied embeddings — all separately proven working).
+It does **not** block smaller-vocabulary checkpoints (TinyStories,
+Felladrin, `tinyllama-15M`, all `VOCAB` ≈ 32000), which this pipeline
+compiles and runs today with a single monolithic lm_head matmul.
 
 ## Symptom
 
@@ -161,7 +167,15 @@ Concretely, per shard `i` of `N`:
    layer names, not the `output_layer` wrapper names.
 8. Re-tar.
 
-## Fix, attempt 3: the native `defuse` command — WORKS, this is what's shipped
+**Superseded** by attempt 4 below on real Qwen-scale checkpoints: this
+mechanism works at small `N` (proven at `N=2` on the tiny 2-layer Qwen3
+toy checkpoint, `VOCAB=151936`) but crashes at `N≥3` with the exact same
+DFC-internal fuser bug attempt 1 hit — see attempt 4's "Root cause,
+finally pinned down" for the full story; this is not a bug in the HN
+surgery itself, it reproduces identically no matter how the multi-output
+graph is constructed.
+
+## Fix, attempt 3: the native `defuse` command — WORKS at small scale, fails on real Qwen-scale checkpoints
 
 The DFC user guide documents a built-in `defuse(layer, defuse_number)`
 model-script command, specifically for this: *"Defusing splits a logical
@@ -188,63 +202,135 @@ limitations"* — matches what was observed: `N=2` too coarse, `N=8` fine.
 No principled formula was derived for the minimum safe `N`; `N=8` is an
 empirically-found value for `VOCAB=32000`, not a general threshold.
 
-## Integration — done
+**Fails again on a real large-vocab checkpoint at any workable `N`.**
+Retried on the real `Qwen/Qwen2.5-0.5B-Instruct` (24 layers, `VOCAB=
+151936`, after separately fixing a real q/k/v-bias export bug this
+checkpoint surfaced — see the commit history). `__prefill` always
+compiled without issue; `__tbt` alone failed every time:
 
-`s6_compile_hef.py` generates the `defuse(...)` directives automatically
-when loading the compiled HAR, gated on `config.LM_HEAD_SHARDS > 1`
-(computed from `VOCAB`/`LM_HEAD_MAX_SHARD_WIDTH` in `config.py`, so it's
-a no-op for every checkpoint validated so far at `VOCAB` around 32000):
+- `N=5` (the config-computed shard count, `ceil(151936/32000)`) and
+  `N=10`: `required too many SCs` (the same too-coarse-a-shard failure
+  as TinyStories' `N=2`).
+- `N=24`: passes the SC wall, but fails with a **new, deterministic**
+  error — `Context-Partition topology error`: a handful of the first
+  1-2 layers' RoPE/mask-consuming ops placed in an earlier partition
+  bucket than the shared inputs they read from. Reproduced
+  byte-for-byte across `performance_param(compiler_optimization_level=1)`,
+  `context_switch_param(allow_auto_merge_in_multicontext=True)`, and
+  `context_switch_param(mode=disabled)` — none of the three documented
+  model-script levers for exactly this symptom class changed the
+  outcome at all. ~32 min per attempt. Full detail:
+  [large-body-multicontext-topology.md](large-body-multicontext-topology.md).
+- `N=32`: both the SC wall (on some shards) and `dc`'s memory-capacity
+  overflow simultaneously.
+- `N=48`: `dc`'s auto-generated concat tree alone overflows on-chip
+  memory (`Memory units capacity exceeded`) — `defuse`'s
+  `concat_f_from_concat_f_from_...` naming confirms it nests pairwise
+  concats in a linear (not balanced) chain, so memory cost keeps growing
+  with `N` past some point regardless of per-shard width.
 
-1. Load the HAR's HN model (`runner.get_hn_model()`) before compiling.
-2. For each active network-group scope (`__prefill`, `__tbt`, plus the
-   base scope with `--include-base-scope`) — **the lm_head layer is
-   duplicated once per scope** by `set_kv_cache_global_params` (confirmed:
-   `ts25mpipe/conv49`, `ts25mpipe__prefill/conv49`,
-   `ts25mpipe__tbt/conv49` all exist as independent HN nodes) — find that
-   scope's output layer whose `original_names` starts with `"logits"`
-   (there are several other output layers per scope, the KV-cache write
-   taps, so filtering by name is required — `hn.get_output_layers()`
-   alone is not enough), then take its sole predecessor
-   (`out_layer.inputs[0]`, already a plain layer-name string) as the
-   layer to defuse.
-3. Emit one `defuse(<scope>/<layer>, N)` line per scope, capturing all
-   `N+1` return values (`N` shards + the auto-generated concat) even
-   though the pipeline never references them by name afterward — DFC
-   requires every return value to be bound or the model script fails to
-   parse.
+No `N` was found that avoids all three failure modes simultaneously for
+this checkpoint. This is what motivated abandoning `defuse` for attempt
+4 below.
 
-The ONNX-side sharding code from attempt 1 (`s1_export_onnx.py`'s
-`Wlm_shards`, multi-output `torch.onnx.export`) was reverted back to a
-single monolithic `Wlm`/`"logits"` output — `s1`/`s2` always produce
-exactly one lm_head output now; only `s6` needs to know about `N`, and
-only at compile time via a model-script directive, not an export-time
-graph shape.
+## Fix, attempt 4: pre-quantization HN/npz split (no on-chip concat) — WORKS at small N, ALSO fails at real Qwen-scale N
 
-**Verified through the full integration** (not just the standalone proof
-above): ran `s6_compile_hef.py --workdir <tinystories-workdir>` with
-`LM_HEAD_SHARDS` forced to 8 in `run_config.json` — the script correctly
-found and defused `conv49` in both `__prefill` and `__tbt` scopes,
-compiled cleanly (43.60 MiB, matching the unsharded 43.94 MiB baseline
-closely), and `hailo_platform.HEF(...).get_output_vstream_infos()` on the
-result confirmed each scope still exposes exactly one `conv49` output at
-the full `(1, 1, 32000)` shape — the sharding is fully invisible past
-compile time, exactly as the `defuse` mechanism promises. A default
-(`LM_HEAD_SHARDS=1`) regression run on the same checkpoint was also
-re-verified unaffected (identical 43.94 MiB HEF, no `defuse` lines
-emitted).
+Motivated by inspecting the official `Qwen2.5-1.5B-Instruct.hef` again:
+its 4 lm_head output convs are **genuinely independent output vstreams,
+concatenated host-side** — there is no on-chip concat at all in the
+official recipe. `defuse`'s mandatory auto-generated concat (attempt 3)
+is therefore not what official tooling does, and is exactly the layer
+implicated in attempt 3's `__tbt`-only failures (SC starvation on the
+shards, then a topology bug, then concat memory overflow — all either
+directly the concat layer or immediately downstream of it).
 
-## Remaining verification
+Implementation: same technique as attempt 2 (post-parse HN/weights
+surgery, no `defuse`), but moved **before** `optimize()` instead of
+after quantization+compile-time-adjacent — i.e. it edits
+`resources.har` (the output of step 3, still pre-`set_kv_cache_global_params`
+duplication, so there is exactly one scope to edit, not three). DFC's
+own `DuplicateLLMToNetworkGroups` pass then replicates the N independent
+output layers into `__prefill`/`__tbt` automatically, the same as every
+other layer — no per-scope handling needed, unlike attempt 3. One format
+difference from the original attempt-2 POC: at this pipeline stage
+weights live in a `.npz` (plain dict of numpy arrays keyed
+`"<layer>/<param>:0"`), not the `.hdf5` the original POC script (written
+against a later ClientRunner-processed HAR) assumed.
 
-Not yet done: recompile `tabularisai/Qwen3-0.3B-distil` (already
-validated correct through step 4 quantization with the *unsharded*
-`lm_head` — see the `head_dim` commit) through step 6 at its real
-`VOCAB=151936` shard count, confirm the HEF compiles, then test base-scope
-generation on hardware for coherent output, same bar used throughout this
-project (`docs/status.md`'s "real English, cosine ≈ 0.99"). Also open:
-whether `LM_HEAD_MAX_SHARD_WIDTH=32000` (implying `ceil(151936/32000) =
-5` shards for Qwen3) is actually wide enough — the empirical evidence so
-far only confirms `N=2` fails and `N=8` works at `VOCAB=32000` (4000-wide
-shards); `N=5` at `VOCAB=151936` implies ~30K-wide shards, close to the
-`N=2` failure's 16000-wide shards in absolute terms but a different
-vocabulary, so this needs its own empirical check rather than assuming
-the TinyStories result transfers directly.
+Implemented as `lm_head_split()` in `s3_surgery_and_resources.py`,
+called right after `mask_surgery()`, gated on `config.LM_HEAD_SHARDS > 1`
+(no-op for every checkpoint validated at `VOCAB` around 32000). The
+downstream `isinstance(out, list)` handling already present in
+`s2_parse_har.py`/`s3_surgery_and_resources.py`'s cosine checks (kept
+from attempt 1, see below) picks up the multi-output case for free.
+
+**Root cause, finally pinned down.** Retested on a 2-layer toy Qwen3
+checkpoint (`yujiepan/qwen3-tiny-random`, `VOCAB=151936` — same
+tokenizer as every real Qwen checkpoint, but a body cheap enough to
+iterate on in seconds instead of ~30 minutes) to bisect fast:
+
+| `N` | step 4 (quantize) |
+|---|---|
+| 2 | ✅ works |
+| 3 | ❌ fails |
+| 5 | ❌ fails |
+
+All three failures are **the exact same error attempt 1 hit at the ONNX
+level**: DFC's post-fuser `normalization_optimizer.py`'s
+`_move_normalization_layers_after_unfuseable_layers()` →
+`fuser_helper.swap_layers_order()` sets `input_shapes` on the shared
+ancestor normalization layer to a list with one entry **per shard**
+(`[[-1,1,1,64]] * N`) instead of one, then `Layer.set_input_shapes()`
+rejects it: `UnsupportedModelError: Unexpected input_shapes at
+normalization layer ...`. This is now confirmed, across three
+structurally different ways of building the multi-output graph (ONNX
+export, `defuse`, direct HN/npz surgery), to be **a genuine DFC-internal
+bug/limitation in the post-fuser's handling of any layer whose output
+fans out to ≥3 independently-tracked successors sharing deep ancestry**
+— not an artifact of any one construction method. `N=2` is a special
+case the fuser's swap logic happens to handle (likely because
+`swap_layers_order()` is written for a binary swap, `first_degree_succs[0]`,
+and just happens not to crash when there are only 2 successors total).
+
+**This closes off both viable sharding mechanisms for real Qwen-scale
+vocabularies**: `N=2` avoids the fuser bug but produces ~76K-wide shards
+— far past the ~32K-38K width every other data point in this
+investigation (TinyStories, the official Hailo HEF's own 4×37984-wide
+convs) shows is the actual placement ceiling. `N≥3` avoids the
+width-placement wall but crashes the fuser unconditionally. **No value
+of `N` satisfies both constraints at once for `VOCAB≈152000`.**
+
+## Current status: open, likely unfixable on DFC 5.3.0
+
+Three independent construction methods (ONNX multi-output export,
+`defuse()`, direct HN/npz surgery) all hit the identical post-fuser
+`normalization_optimizer` crash once fan-out reaches 3, and a fourth,
+independent placement-width ceiling (~32K-38K, corroborated by the
+official Hailo HEF's own output-conv width) makes `N=2` unusable for a
+152K-token vocabulary. Together these bracket out every value of `N`.
+Real Qwen2/Qwen2.5/Qwen3 checkpoints remain blocked on this DFC version
+regardless of which sharding mechanism is used; every other fix on this
+generalization branch (tied embeddings, QK-Norm, explicit `head_dim`,
+q/k/v projection biases) is proven correct independent of this wall.
+
+**What would actually move this forward**, none attempted:
+
+1. `pre_quantization_optimization(defuse, layers=X, num_splits=N,
+   defuse_type=MHA)` — a different, attention-block-specific defuse
+   mechanism documented separately from the compilation-time `defuse()`
+   used in attempt 3 (see the DFC user guide's Model Optimization
+   section, not the Model Compilation section). Untested against this
+   symptom — it targets the attention block's first matmul, not
+   lm_head, so may not even apply, but was found only after this
+   investigation's attempts were already exhausted.
+2. Report the post-fuser bug upstream — it is reproducible, minimal
+   (any conv with ≥3 independently-tracked successors sharing an
+   ancestor normalization layer), and version-specific to DFC 5.3.0;
+   worth checking against a newer DFC release if one becomes available.
+3. A fundamentally different approach to the vocabulary problem
+   entirely — e.g. quantizing lm_head to a narrower effective width
+   somehow, or restructuring the export so the shared ancestor
+   normalization layer itself isn't shared (duplicate the final RMSNorm
+   N times before the split, so the fuser never sees a fan-out ≥3 point)
+   — untested, plausible given the bug is specifically about the fuser's
+   handling of the *shared ancestor*, not the split itself.

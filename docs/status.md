@@ -36,28 +36,33 @@ fidelity gate) on 4 additional checkpoints spanning GQA and MHA, 4-22
 layers, 64-768 hidden — all pass step 1; step 2's cosine degrades with
 model scale on larger checkpoints, a second open issue
 ([findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
-Tied embeddings, QK-Norm (Qwen3-style), and explicit `head_dim` are now
-supported and verified through quantization on real checkpoints
+Tied embeddings, QK-Norm (Qwen3-style), explicit `head_dim`, and q/k/v
+projection biases (present on Qwen2-style architectures, silently
+dropped by the exporter until this session — a real bug, found and
+fixed while validating on a real, non-distilled `Qwen2.5-0.5B-Instruct`
+checkpoint chosen specifically to test on) are now supported and
+verified through quantization on real checkpoints
 (`nickypro/tinyllama-15M`, `Qwen/Qwen3-0.6B`,
-`tabularisai/Qwen3-0.3B-distil`). A separate, unrelated wall — any
-checkpoint sharing Qwen's ~152K-token vocabulary used to fail `lm_head`
-placement as one monolithic matmul — is now fixed: step 6 generates a
-native `defuse(layer, N)` model-script directive automatically per
-network-group scope, proven on hardware to be byte-identical to the
-unsharded baseline and integrated into the pipeline
+`tabularisai/Qwen3-0.3B-distil`, `Qwen/Qwen2.5-0.5B-Instruct`).
+
+**Large-vocabulary `lm_head` remains open, and is now believed likely
+unfixable on this DFC version.** Every checkpoint sharing Qwen's
+~152K-token vocabulary fails `lm_head` placement as one monolithic
+matmul; three independently-built sharding fixes were tried (ONNX
+multi-output export, the native `defuse()` model-script command, and a
+pre-quantization HN/weights surgery mirroring official Hailo HEFs'
+genuinely-independent output convs) — all three hit the identical
+DFC-internal post-fuser bug once shard fan-out reaches 3, bracketed
+against a ~32K-38K width placement ceiling (corroborated by an official
+Hailo HEF's own output-conv width) that makes fan-out 2 unusable for a
+152K-token vocabulary. No value of `N` satisfies both constraints at
+once
 ([findings/large-vocab-lm-head-sharding.md](findings/large-vocab-lm-head-sharding.md)).
-Not yet re-verified at Qwen3's actual `VOCAB=151936` shard count end to
-end through step 6 — attempting this on a real 24-layer checkpoint
-(`Qwen2.5-0.5B-Instruct`, a real non-distilled model chosen specifically
-to validate on) surfaced a second, unrelated bug along the way: q/k/v
-projection biases (present on Qwen2-style architectures, absent on
-LLaMA/Qwen3-style ones) were silently dropped by the exporter — fixed
-(now fixed here). Past that fix, a separate, deeper wall was found: a
-deterministic `__tbt` context-partition topology error at this
-checkpoint's scale, independent of lm_head shard count or every
-model-script tuning knob tried
-([findings/large-body-multicontext-topology.md](findings/large-body-multicontext-topology.md)),
-not yet resolved.
+A related, separate DFC limitation was also found and documented while
+investigating this: a deterministic `__tbt` context-partition topology
+error specific to large (24-layer) bodies, surfaced only via the
+now-abandoned `defuse()` path
+([findings/large-body-multicontext-topology.md](findings/large-body-multicontext-topology.md)).
 
 ## Stage-by-stage
 
@@ -68,7 +73,7 @@ not yet resolved.
 | Graph surgery + resources | ✅ solid on hardware, same emulation caveat | `mask_surgery()`'s `input_layer2` rewiring is correct — it was the prime suspect until hardware evidence ruled it out |
 | Quantization (KV-cache) | ✅ runs (~30 s GPU) | recipe validated by comparison with official `.alls`; no emulator check possible (see below) |
 | Conv repair pass | ✅ kept as safety net | finds 0 issues with the final recipe — its historical cause was ew_add_fusing |
-| HAR → HEF compile | ✅ works (~5–8 min) | both network groups emitted; lm_head places at optimization_level=0 thanks to the last-position slice, auto-sharded via `defuse()` when VOCAB is large |
+| HAR → HEF compile | ✅ works (~5–8 min) at `VOCAB` around 32000 | both network groups emitted; lm_head places at optimization_level=0 thanks to the last-position slice; ❌ blocked on large-vocabulary (Qwen-family) checkpoints, likely unfixable on this DFC version |
 | Notebooks ([../notebooks/](../notebooks/)) | ✅ tested headless + on hardware | `walkthrough.ipynb` executes the full chain green (HEF ≈ 44 MiB); its HEF was probed through the raw `InferModel` API: prefill logits cosine 0.998 with exact argmax, tbt degraded identically to pipeline HEFs |
 | genai.LLM load | ✅ works | HEF passes the full runtime contract (six inputs, embedded resources, config keys) |
 | hailo-ollama serving | ✅ registration + serving work | content-addressed blob store + manifest procedure documented |

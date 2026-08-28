@@ -137,6 +137,95 @@ def mask_surgery(layers: dict, scope: str) -> list:
     return slice_names
 
 
+def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tuple[str, list[str]] | None:
+    # NOTE: `params` is the network's raw weights dict as stored in the
+    # (pre-optimize) HAR's .npz -- key layout "<layer>/<param>:0", plain
+    # numpy arrays. Mutated in place; caller re-serializes to .npz.
+    """Split the monolithic lm_head matmul into N independently-placed
+    output convs, pre-quantization -- the same technique official Hailo
+    HEFs use for large vocabularies (confirmed by inspecting an official
+    Qwen2.5-1.5B HEF's output vstreams: 4 separate ~38K-wide outputs, not
+    one 152K-wide one). No-op when a single shard covers the whole VOCAB.
+
+    Deliberately NOT built on the `defuse()` model-script command (tried
+    first, see docs/findings/large-vocab-lm-head-sharding.md): defuse's
+    mandatory auto-generated on-chip concat is itself the root of two
+    separate, severe compile-time failures at scale (subcluster
+    starvation and a deterministic multi-context topology error) --
+    see docs/findings/large-body-multicontext-topology.md. This function
+    instead produces genuinely independent output layers with no on-chip
+    merge at all, exactly mirroring the official recipe; the host
+    concatenates the N logits arrays after inference (already handled by
+    every downstream cosine check in this pipeline via the
+    `isinstance(out, list)` branch).
+
+    Runs on `resources.har` (pre-`optimize()`) deliberately: this is
+    still the single, undeplicated base scope --
+    `set_kv_cache_global_params` only duplicates into `__prefill`/`__tbt`
+    scopes *inside* `optimize()` (confirmed elsewhere in this project).
+    DFC's own duplication pass then replicates these N output layers into
+    all three scopes automatically, exactly like every other layer --
+    no per-scope handling needed here, unlike the abandoned defuse-based
+    approach which had to target three scopes explicitly.
+    """
+    if n_shards <= 1:
+        return None
+
+    out_layer_name = next(
+        name for name, layer in layers.items()
+        if layer.get("type") == "output_layer" and name.startswith(f"{scope}/")
+        and any(o.startswith("logits") for o in layer.get("original_names", []))
+    )
+    out_layer = layers[out_layer_name]
+    old_name = out_layer["input"][0]
+    old_layer = layers[old_name]
+    vocab = old_layer["output_shapes"][0][-1]
+    bounds = np.linspace(0, vocab, n_shards + 1, dtype=int)
+
+    kernel = params[f"{old_name}/kernel:0"]
+    bias = params[f"{old_name}/bias:0"]
+    pad_const = params[f"{old_name}/padding_const_value:0"]
+
+    shard_names = []
+    for i in range(n_shards):
+        lo, hi = int(bounds[i]), int(bounds[i + 1])
+        shard_name = f"{old_name}_shard{i}"
+        shard_out_name = f"{out_layer_name}_shard{i}"
+
+        shard_layer = dict(old_layer)
+        shard_layer["output_shapes"] = [old_layer["output_shapes"][0][:-1] + [hi - lo]]
+        shard_layer["output"] = [shard_out_name]
+        shard_layer["original_names"] = [f"logits_{i}"]
+        shard_layer["params"] = dict(old_layer["params"])
+        shard_layer["params"]["kernel_shape"] = [1, 1, kernel.shape[2], hi - lo]
+        layers[shard_name] = shard_layer
+
+        shard_out_layer = dict(out_layer)
+        shard_out_layer["input"] = [shard_name]
+        shard_out_layer["input_shapes"] = [shard_layer["output_shapes"][0]]
+        shard_out_layer["output_shapes"] = [shard_layer["output_shapes"][0]]
+        shard_out_layer["original_names"] = [f"logits_{i}"]
+        layers[shard_out_name] = shard_out_layer
+        shard_names.append(shard_name)
+
+        params[f"{shard_name}/kernel:0"] = kernel[:, :, :, lo:hi]
+        params[f"{shard_name}/bias:0"] = bias[lo:hi]
+        params[f"{shard_name}/padding_const_value:0"] = pad_const
+
+    for pred_name in old_layer["input"]:
+        pred = layers[pred_name]
+        pred["output"] = [n for n in pred["output"] if n != old_name] + shard_names
+
+    del layers[old_name]
+    del layers[out_layer_name]
+    del params[f"{old_name}/kernel:0"]
+    del params[f"{old_name}/bias:0"]
+    del params[f"{old_name}/padding_const_value:0"]
+
+    print(f"  lm_head split: {old_name} ({vocab} wide) -> {n_shards} shards ({shard_names[0]}..{shard_names[-1]})")
+    return old_name, shard_names
+
+
 def build_hailo_config() -> dict:
     """Generation-side configuration embedded into the HEF.
 
@@ -254,6 +343,17 @@ def main() -> None:
 
         print("=== surgery 2/2: attention mask (direct wiring to input_layer2) ===")
         removed_slices = mask_surgery(layers, scope)
+
+        if config.LM_HEAD_SHARDS > 1:
+            print(f"=== surgery 3/3: lm_head split ({config.LM_HEAD_SHARDS} shards) ===")
+            npz_path = hn_path[: -len(".hn")] + ".npz"
+            params = dict(np.load(npz_path))
+            split_info = lm_head_split(layers, scope, params, config.LM_HEAD_SHARDS)
+            old_name, shard_names = split_info
+            np.savez(npz_path, **params)
+            order = hn["net_params"]["output_layers_order"]
+            idx = order.index(old_name)
+            hn["net_params"]["output_layers_order"] = order[:idx] + shard_names + order[idx + 1:]
 
         with open(hn_path, "w") as f:
             json.dump(hn, f)

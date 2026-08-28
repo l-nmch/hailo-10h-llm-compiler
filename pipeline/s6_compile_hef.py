@@ -65,45 +65,22 @@ def main() -> None:
 
     runner = ClientRunner(har=str(P.har_convfixed))
 
-    defuse_lines = []
-    if config.LM_HEAD_SHARDS > 1:
-        # DFC's placer rejects a single lm_head matmul this wide once VOCAB
-        # is large (e.g. Qwen3's ~152K tokens) -- see
-        # docs/findings/large-vocab-lm-head-sharding.md. Fix: split it into
-        # N physical layers via the native `defuse` model-script command,
-        # one per network-group scope present in this HAR (base/__prefill/
-        # __tbt each carry their own copy of the lm_head layer). The
-        # compiler auto-reconcatenates the N pieces into one logical
-        # output, so nothing downstream (runtime scripts, HN output count)
-        # needs to know sharding happened.
-        hn = runner.get_hn_model()
-        active_scopes = [f"{scope}__prefill", f"{scope}__tbt"]
-        if args.include_base_scope:
-            active_scopes.append(scope)
-        for sc in active_scopes:
-            # Each scope has several output layers (the logits head plus one
-            # pair of cache-write outputs per decoder layer) -- the lm_head
-            # is the one whose original name is "logits" (s1_export_onnx.py's
-            # single ONNX output name).
-            out_layers = [
-                n for n in hn.get_output_layers()
-                if n.name.startswith(f"{sc}/") and any(
-                    orig.startswith("logits") for orig in n.original_names
-                )
-            ]
-            assert len(out_layers) == 1, f"expected exactly one logits output layer in {sc}, got {out_layers}"
-            lm_head_layer = out_layers[0].inputs[0]
-            n = config.LM_HEAD_SHARDS
-            names = ", ".join([f"d{i}" for i in range(n)] + ["dc"])
-            defuse_lines.append(f"{names} = defuse({lm_head_layer}, {n})")
-        print(f"lm_head sharding: VOCAB={config.VOCAB} -> {config.LM_HEAD_SHARDS} shards per scope")
+    # lm_head sharding (large VOCAB, e.g. Qwen3's ~152K tokens) is handled
+    # upstream in s3_surgery_and_resources.py, pre-quantization, as N
+    # genuinely independent output convs -- not here. An earlier attempt
+    # used the native `defuse()` model-script command at this stage
+    # instead; abandoned after it caused two severe compile-time failures
+    # of its own at scale (subcluster starvation, then a deterministic
+    # multi-context topology error) -- both traced to defuse's mandatory
+    # auto-generated on-chip concat. See
+    # docs/findings/large-vocab-lm-head-sharding.md and
+    # docs/findings/large-body-multicontext-topology.md.
 
     base_group_line = ""
     if args.include_base_scope:
         base_group_line = f"{scope} = network_group([{scope}])"
     compile_script = "\n".join([
         "performance_param(compiler_optimization_level=0)",
-        *defuse_lines,
         f"{scope}__prefill = network_group([{scope}__prefill])",
         f"{scope}__tbt = network_group([{scope}__tbt])",
         base_group_line,
