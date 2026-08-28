@@ -36,14 +36,20 @@ fidelity gate) on 4 additional checkpoints spanning GQA and MHA, 4-22
 layers, 64-768 hidden — all pass step 1; step 2's cosine degrades with
 model scale on larger checkpoints, a second open issue
 ([findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
-Tied embeddings, QK-Norm (Qwen3-style), explicit `head_dim`, and q/k/v
+Tied embeddings, QK-Norm (Qwen3-style), explicit `head_dim`, q/k/v
 projection biases (present on Qwen2-style architectures, silently
 dropped by the exporter until this session — a real bug, found and
 fixed while validating on a real, non-distilled `Qwen2.5-0.5B-Instruct`
-checkpoint chosen specifically to test on) are now supported and
-verified through quantization on real checkpoints
+checkpoint chosen specifically to test on), and sliding-window attention
+(Mistral-style — needed zero exporter changes at all, since this
+project's mask is entirely host-computed and content-agnostic to the
+graph; verified end to end including hailo-ollama serving on
+`Locutusque/TinyMistral-248M` —
+[findings/sliding-window-attention.md](findings/sliding-window-attention.md))
+are now supported and verified through quantization on real checkpoints
 (`nickypro/tinyllama-15M`, `Qwen/Qwen3-0.6B`,
-`tabularisai/Qwen3-0.3B-distil`, `Qwen/Qwen2.5-0.5B-Instruct`).
+`tabularisai/Qwen3-0.3B-distil`, `Qwen/Qwen2.5-0.5B-Instruct`,
+`Locutusque/TinyMistral-248M`).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
 Qwen's ~152K-token vocabulary used to fail `lm_head` placement as one
