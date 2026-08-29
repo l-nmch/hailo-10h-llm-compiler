@@ -54,14 +54,19 @@ are now supported and verified through quantization on real checkpoints
 **A third real-hardware fidelity gap was found, this time on
 base-scope (no-cache) generation** — previously this project's control
 test for "is the compiled model itself sound", always coherent before
-now. `TinyMistral-248M`'s base-scope output degenerates to constant
-token repetition; the identical prompt through the float32 HF reference
-produces real, coherent English, ruling out a weak/undertrained
-checkpoint as the explanation. The lm_head-splitting surgery was
-directly cleared as the cause: forcing the identical surgery code path
-onto the project's always-coherent TinyStories baseline produced fully
-coherent base-scope text, unaffected. Scale and/or non-power-of-two GQA
-ratio are now the leading suspects, shared with the Qwen2.5 drift above
+now. Reproduced on two independent checkpoints (`TinyMistral-248M`,
+`SmolLM2-135M` — the latter also confirming the historical "30-layer
+memory wall" no longer applies with this project's current
+recipe/memory discipline, since it compiled cleanly). The identical
+prompt through float32 HF is coherent in both cases, ruling out weak
+checkpoints as the explanation, and the lm_head-splitting surgery was
+directly cleared as the cause (forcing it onto the always-coherent
+TinyStories baseline produced fully coherent output, unaffected).
+**The strongest lead**: every degraded checkpoint (`Qwen2.5-0.5B`,
+`TinyMistral-248M`, `SmolLM2-135M`) shares a non-power-of-2 GQA ratio
+(`NREP` 3, 4, or 7) that every coherent checkpoint validated on this
+branch lacks (`NREP` 1 or 2) — scale alone doesn't fit as cleanly
+(12-layer TinyMistral and 30-layer SmolLM2 degrade identically)
 ([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing

@@ -1,12 +1,14 @@
-# Finding 16 — OPEN: base-scope generation degenerates on TinyMistral-248M, unlike every prior checkpoint
+# Finding 16 — OPEN: base-scope generation degenerates on larger/non-power-of-2-GQA checkpoints
 
-**Status: open, just discovered, not yet root-caused.** Base-scope
+**Status: open, reproduced on two independent checkpoints, lm_head
+surgery cleared as the cause, root cause not yet found.** Base-scope
 generation (no KV-cache — the pipeline's control test for "is the
 compiled model itself sound", used throughout this project to isolate
 the `__tbt` cache-read bug from everything else) fails on
 `Locutusque/TinyMistral-248M`, the checkpoint used to validate
 sliding-window attention support
-([sliding-window-attention.md](sliding-window-attention.md)). This is a
+([sliding-window-attention.md](sliding-window-attention.md)), **and** on
+`HuggingFaceTB/SmolLM2-135M` (see "Second confirmation" below). This is a
 new, different failure mode from every prior checkpoint's base-scope
 result (TinyStories: coherent English; this one: degenerate repetition).
 
@@ -134,19 +136,60 @@ produces correct results. The drift's real cause remains open; leading
 candidates now shift toward checkpoint scale, GQA ratio, or something
 else specific to those two checkpoints that TinyStories doesn't share.
 
+## Second confirmation: SmolLM2-135M shows the identical degenerate pattern
+
+Ran the identical base-scope test on `HuggingFaceTB/SmolLM2-135M`
+(30 layers, `hidden=576`, GQA 9/3, `NREP=3`, `VOCAB=49152` needing
+`LM_HEAD_SHARDS=2`) — a real, standard `LlamaForCausalLM` checkpoint
+notable for two things: it's the deepest checkpoint validated on this
+branch so far, and it's a *second* independent architecture sharing a
+non-power-of-2 GQA ratio with `Qwen2.5-0.5B-Instruct` (`NREP=7`) and
+`TinyMistral-248M` (`NREP=4`). Compiled cleanly through step 6 (both
+the standard 2-group HEF and this `--include-base-scope` variant,
+289.95 MiB, ~4h16m — confirming the historical "30-layer memory wall"
+noted in the wiki's Porting-Another-Model.md no longer applies with
+this project's current recipe/memory discipline). Base-scope greedy
+generation on real hardware:
+
+```
+'2162162162162162162162162162162162812161544221641262'
+```
+
+Degenerates to constant repetition of token `216`, the exact same
+failure signature as TinyMistral — a third checkpoint, third
+architecture family (standard LLaMA, not Mistral/Qwen2), showing the
+same pattern. **Every degraded checkpoint so far (`Qwen2.5-0.5B`,
+`TinyMistral-248M`, `SmolLM2-135M`) has `NREP` of 3, 4, or 7 — every
+coherent one (`TinyStories`, and every smaller checkpoint validated
+earlier in this branch) has `NREP` of 1 or 2.** This is now the
+strongest correlation found; scale alone doesn't fully explain it either
+(`TinyMistral` at 12 layers already degrades, `SmolLM2` at 30 layers
+degrades the same way — no obvious scale gradient between them, both
+just share `NREP ∉ {1, 2}`).
+
 ## Not yet done
 
-- Since the surgery itself is cleared, revisit
-  [large-checkpoint-prefill-drift.md](large-checkpoint-prefill-drift.md)'s
-  remaining candidates directly: checkpoint scale (12-24 layers vs.
-  TinyStories' 4) and/or non-trivial GQA ratio (`NREP=4` and `NREP=7`
-  vs. TinyStories' `NREP=2`) are now the leading suspects.
-- A useful next test: the same surgery-forcing trick, but on a
-  **deeper** LLaMA-shaped checkpoint that's already known to compile
-  cleanly without needing lm_head sharding (e.g. one of the mid-size
-  GQA checkpoints mentioned in `sdk-native-cosine-drift.md`'s scale
-  study) — if base-scope degrades there too, scale is confirmed as (at
-  least part of) the real driver, independent of the lm_head surgery.
+- **`NREP` (GQA ratio) is now the leading, most-correlated hypothesis** —
+  test it directly and in isolation: take an already-known-coherent
+  checkpoint (TinyStories or one of the smaller GQA checkpoints already
+  validated on this branch, `NREP=2`) and artificially construct or find
+  a real checkpoint at similar scale but with `NREP` of 3 or more, to
+  separate "GQA ratio" from "scale" as cleanly as possible. If a
+  same-scale, `NREP∈{1,2}` checkpoint stays coherent while an
+  otherwise-identical `NREP≥3` one degrades, that would confirm the GQA
+  ratio itself (not scale) as the driver.
+- Check `make_repeat_kv_matrix()`/`make_tile_matrix()` in
+  `s1_export_onnx.py` specifically for any subtle correctness issue that
+  only manifests for non-power-of-2 `n_rep` — the matmul-trick GQA
+  reimplementation was never explicitly tested for exact numeric
+  equivalence to HF's own `repeat_kv` beyond the SDK_NATIVE/step-1-3
+  cosine gates, which are known to have their own confounds
+  ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) that could
+  mask a real bug at these ratios specifically.
+- If GQA ratio is ruled out, revisit checkpoint scale directly (compare
+  TinyMistral at 12 layers against SmolLM2 at 30 — both already degrade
+  equally, which weakens a pure-scale explanation but doesn't fully
+  rule out a "scale beyond some low threshold" story).
 
 ## Impact
 
