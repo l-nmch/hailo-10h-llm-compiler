@@ -57,6 +57,22 @@ here.
 - **Not `hailo-ollama`/genai's prompt handling**: the low-level
   `InferModel` path bypasses both entirely.
 
+## Update: a second checkpoint shows the same pattern, pointing at the lm_head surgery specifically
+
+[tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)
+found the same class of drift on a second, independent checkpoint
+(`Locutusque/TinyMistral-248M`, base-scope this time, not `__tbt`), and
+went one step further: per-shard comparison against the HF reference
+shows **both** lm_head output shards degraded by a comparable amount
+(cosine 0.84 and 0.92) rather than one shard being correct and the
+other broken — ruling out a shard-boundary/reconstruction bug and
+pointing instead at something upstream of the split. Both checkpoints
+share one thing no previously-validated checkpoint needed: the new
+pre-quantization lm_head-splitting surgery (candidate 1 below). That
+finding's "Not yet done" section proposes the concrete next test
+(forcing the surgery's code path with `LM_HEAD_SHARDS=1` on an
+already-known-good checkpoint) to confirm or rule this out directly.
+
 ## What's still open
 
 The drift's source is unconfirmed. Candidates, none yet tested:
