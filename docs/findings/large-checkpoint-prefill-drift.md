@@ -57,21 +57,19 @@ here.
 - **Not `hailo-ollama`/genai's prompt handling**: the low-level
   `InferModel` path bypasses both entirely.
 
-## Update: a second checkpoint shows the same pattern, pointing at the lm_head surgery specifically
+## Update: the lm_head-splitting surgery is cleared as a cause
 
 [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)
 found the same class of drift on a second, independent checkpoint
-(`Locutusque/TinyMistral-248M`, base-scope this time, not `__tbt`), and
-went one step further: per-shard comparison against the HF reference
-shows **both** lm_head output shards degraded by a comparable amount
-(cosine 0.84 and 0.92) rather than one shard being correct and the
-other broken — ruling out a shard-boundary/reconstruction bug and
-pointing instead at something upstream of the split. Both checkpoints
-share one thing no previously-validated checkpoint needed: the new
-pre-quantization lm_head-splitting surgery (candidate 1 below). That
-finding's "Not yet done" section proposes the concrete next test
-(forcing the surgery's code path with `LM_HEAD_SHARDS=1` on an
-already-known-good checkpoint) to confirm or rule this out directly.
+(`Locutusque/TinyMistral-248M`), and ran a direct isolation test: forced
+the exact same lm_head-splitting surgery code path
+(`LM_HEAD_SHARDS=2`) onto `Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA` —
+the project's original, always-coherent baseline, which never naturally
+needs sharding. Base-scope generation on real hardware was **fully
+coherent** ("Once upon a time there was a little girl who lived in a
+small house" → ". She was very excited about her family"). This
+conclusively rules out candidate 1 below: the surgery itself is not the
+cause. Candidate 2 (scale/GQA ratio) is now the leading explanation.
 
 ## What's still open
 

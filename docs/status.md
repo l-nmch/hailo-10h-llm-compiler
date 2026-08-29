@@ -57,10 +57,11 @@ test for "is the compiled model itself sound", always coherent before
 now. `TinyMistral-248M`'s base-scope output degenerates to constant
 token repetition; the identical prompt through the float32 HF reference
 produces real, coherent English, ruling out a weak/undertrained
-checkpoint as the explanation. This checkpoint is also the first to
-land on the lm_head `N=2` shard-count case specifically (every other
-sharded checkpoint tested needed `N≥5`) — not yet confirmed as the
-cause, but flagged as the most likely candidate
+checkpoint as the explanation. The lm_head-splitting surgery was
+directly cleared as the cause: forcing the identical surgery code path
+onto the project's always-coherent TinyStories baseline produced fully
+coherent base-scope text, unaffected. Scale and/or non-power-of-two GQA
+ratio are now the leading suspects, shared with the Qwen2.5 drift above
 ([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing

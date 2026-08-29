@@ -108,24 +108,45 @@ needed sharding (`LM_HEAD_SHARDS=1`, a no-op path). The surgery itself
 (not specifically its `N=2` vs `N=5` shard count) is now the leading
 suspect common to both new findings.
 
+## Surgery isolation test: rules out the lm_head-splitting surgery entirely
+
+Forced the surgery's code path on `Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA`
+(the project's original, always-coherent baseline) by setting
+`LM_HEAD_SHARDS=2` in its `run_config.json` (`VOCAB=32000` never
+naturally needs sharding — this exercises `lm_head_split()`'s plumbing
+for no real reason, purely to test the mechanism in isolation).
+Confirmed the surgery actually ran (`s3`'s log: `lm_head split:
+ts25mpipe/conv49 (32000 wide) -> 2 shards ..., chain [slice5,
+mul_and_add13] duplicated per shard`), compiled a base-scope HEF
+(8m44s, 55.70 MiB — the fast/small checkpoint this project started
+with), and ran greedy base-scope generation on real hardware:
+
+```
+prompt:    Once upon a time there was a little girl who lived in a small house
+generated: . She was very excited about her family
+```
+
+**Fully coherent, grammatically correct English.** This conclusively
+rules out the lm_head-splitting surgery itself as the root cause of the
+drift seen on both TinyMistral and Qwen2.5 — the exact same surgery
+code, run on a checkpoint immune to whatever is affecting those two,
+produces correct results. The drift's real cause remains open; leading
+candidates now shift toward checkpoint scale, GQA ratio, or something
+else specific to those two checkpoints that TinyStories doesn't share.
+
 ## Not yet done
 
-- Test a checkpoint that goes through the lm_head-splitting surgery
-  code path with `LM_HEAD_SHARDS=1` forced artificially (a trivial
-  "split" into one shard, exercising the surgery's plumbing without
-  actually changing vocabulary width) on an otherwise
-  already-known-good checkpoint (e.g. TinyStories) — if base-scope
-  degrades there too, that isolates the surgery itself as the cause,
-  independent of checkpoint scale/architecture.
-- Alternatively, test the *unsharded* forward (bypass `s3`'s
-  `lm_head_split()` entirely, `LM_HEAD_SHARDS` forced to 1) on
-  TinyMistral or Qwen2.5-0.5B directly — if that HEF's base-scope/prefill
-  is coherent, it confirms the surgery is the root cause rather than
-  something about these checkpoints' scale/GQA ratio.
-- Re-run the same base-scope test on a checkpoint sharing this
-  architecture's `NREP=4` but a `VOCAB` that doesn't need lm_head
-  sharding at all, to separate "sharding surgery" from "GQA ratio" as
-  variables if the above two tests are inconclusive.
+- Since the surgery itself is cleared, revisit
+  [large-checkpoint-prefill-drift.md](large-checkpoint-prefill-drift.md)'s
+  remaining candidates directly: checkpoint scale (12-24 layers vs.
+  TinyStories' 4) and/or non-trivial GQA ratio (`NREP=4` and `NREP=7`
+  vs. TinyStories' `NREP=2`) are now the leading suspects.
+- A useful next test: the same surgery-forcing trick, but on a
+  **deeper** LLaMA-shaped checkpoint that's already known to compile
+  cleanly without needing lm_head sharding (e.g. one of the mid-size
+  GQA checkpoints mentioned in `sdk-native-cosine-drift.md`'s scale
+  study) — if base-scope degrades there too, scale is confirmed as (at
+  least part of) the real driver, independent of the lm_head surgery.
 
 ## Impact
 
