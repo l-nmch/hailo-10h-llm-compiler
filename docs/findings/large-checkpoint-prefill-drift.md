@@ -69,7 +69,17 @@ needs sharding. Base-scope generation on real hardware was **fully
 coherent** ("Once upon a time there was a little girl who lived in a
 small house" → ". She was very excited about her family"). This
 conclusively rules out candidate 1 below: the surgery itself is not the
-cause. Candidate 2 (scale/GQA ratio) is now the leading explanation.
+cause.
+
+**Further update: GQA ratio also cleared.** A third isolation test —
+`Felladrin/Llama-160M-Chat-v1` (12 layers, `NREP=1`, pure MHA, no
+sharding) — degraded with the identical constant-token-repetition
+signature, refuting non-power-of-2 GQA ratio as the driver (full detail
+in [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)'s
+"GQA-ratio hypothesis refuted" section). Checkpoint depth/hidden scale
+alone (candidate 2, narrowed) is now the leading explanation — every
+degraded checkpoint has `NLAYERS≥12`, the only coherent one has
+`NLAYERS=4`.
 
 ## What's still open
 
@@ -81,14 +91,14 @@ The drift's source is unconfirmed. Candidates, none yet tested:
    [large-vocab-lm-head-sharding.md](large-vocab-lm-head-sharding.md))
    introduces a numeric discrepancy somewhere in the duplicated
    slice/normalization chain.
-2. Quantization fidelity genuinely degrades at this checkpoint's scale
-   or its odd (non-power-of-2) GQA ratio (`NREP=7`, unlike every
-   previously-tested checkpoint's `NREP` of 1, 2, or 4) — consistent
-   with the already-documented general pattern that larger checkpoints
-   show worse cosine
+2. Quantization fidelity genuinely degrades at this checkpoint's
+   depth/hidden scale (24 layers here; GQA ratio itself is now ruled
+   out as a confound — see the update above) — consistent with the
+   already-documented general pattern that larger checkpoints show
+   worse cosine
    ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)'s "Downstream
    symptom" section, though that finding was about a different,
-   smaller-vocabulary checkpoint).
+   smaller-vocabulary checkpoint). **Now the leading candidate.**
 3. Something specific to the 24-layer scale itself, independent of both
    of the above — the same scale that also produced the separate
    `__tbt` context-partition topology error when this checkpoint was
@@ -97,12 +107,15 @@ The drift's source is unconfirmed. Candidates, none yet tested:
 
 ## Next steps (not started)
 
-1. Compare prefill cosine on the *unsharded* HN (same checkpoint,
+1. ~~Compare prefill cosine on the *unsharded* HN (same checkpoint,
    `VOCAB` truncated or lm_head disabled) to isolate whether the
-   sharding surgery itself is the source.
-2. Compare against a shallower real checkpoint with a similarly odd GQA
-   ratio, if one can be found, to separate "scale" from "GQA ratio" as
-   variables.
+   sharding surgery itself is the source.~~ Done via
+   [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)'s
+   TinyStories surgery-isolation test — surgery cleared.
+2. ~~Compare against a shallower real checkpoint with a similarly odd
+   GQA ratio, to separate "scale" from "GQA ratio".~~ Done via that
+   same finding's Felladrin-160M test — GQA ratio cleared, depth is now
+   the leading variable.
 3. Re-run the same isolated prefill test on `tabularisai/Qwen3-0.3B-distil`
    (14 layers, `NREP=2`, once its lm_head is sharded via the new
    pre-quantization approach) as a middle data point between TinyStories

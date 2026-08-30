@@ -1,16 +1,19 @@
-# Finding 16 — OPEN: base-scope generation degenerates on larger/non-power-of-2-GQA checkpoints
+# Finding 16 — OPEN: base-scope generation degenerates on deeper/larger-hidden checkpoints
 
-**Status: open, reproduced on two independent checkpoints, lm_head
-surgery cleared as the cause, root cause not yet found.** Base-scope
+**Status: open, reproduced on three independent checkpoints. lm_head
+surgery AND GQA ratio both cleared as the cause — depth/hidden scale
+is the leading remaining hypothesis, root cause not yet found.** Base-scope
 generation (no KV-cache — the pipeline's control test for "is the
 compiled model itself sound", used throughout this project to isolate
 the `__tbt` cache-read bug from everything else) fails on
 `Locutusque/TinyMistral-248M`, the checkpoint used to validate
 sliding-window attention support
-([sliding-window-attention.md](sliding-window-attention.md)), **and** on
-`HuggingFaceTB/SmolLM2-135M` (see "Second confirmation" below). This is a
-new, different failure mode from every prior checkpoint's base-scope
-result (TinyStories: coherent English; this one: degenerate repetition).
+([sliding-window-attention.md](sliding-window-attention.md)), and on
+`HuggingFaceTB/SmolLM2-135M` and `Felladrin/Llama-160M-Chat-v1` (see
+"Second confirmation" and "GQA-ratio hypothesis refuted" below). This
+is a new, different failure mode from every prior checkpoint's
+base-scope result (TinyStories: coherent English; these: degenerate
+repetition).
 
 ## Symptom
 
@@ -167,29 +170,57 @@ strongest correlation found; scale alone doesn't fully explain it either
 degrades the same way — no obvious scale gradient between them, both
 just share `NREP ∉ {1, 2}`).
 
+## GQA-ratio hypothesis refuted: `Felladrin/Llama-160M-Chat-v1` (NREP=1, MHA) degrades too
+
+Direct isolation test: `Felladrin/Llama-160M-Chat-v1` — 12 layers
+(matching TinyMistral exactly), `hidden=768`, **`NREP=1` (pure MHA, no
+GQA at all)**, `VOCAB=32000` (`LM_HEAD_SHARDS=1`, no sharding surgery
+involved either — this test isolates depth/hidden alone, with every
+other variable this investigation has considered removed). If the GQA
+ratio were the real driver, this checkpoint should behave like
+TinyStories (coherent). It did not:
+
+```
+'263263263263263263278263263263263263263263263263'
+```
+
+**Identical degenerate constant-repetition pattern** (token `263` =
+`"a"`), same signature as TinyMistral and SmolLM2. **This refutes the
+GQA-ratio hypothesis** — `NREP=1` is exactly what TinyStories has as
+its "safe" baseline family (`NREP∈{1,2}` was the dividing line
+proposed earlier), yet it degrades anyway. The earlier NREP correlation
+was confounded: every previously-tested non-power-of-2-`NREP`
+checkpoint also happened to be deeper (12-30 layers) than TinyStories
+(4 layers) — this test breaks that confound and points cleanly at
+**depth/hidden scale**, not GQA ratio, as the real variable. Every
+degraded checkpoint so far has `NLAYERS≥12`; the only coherent one has
+`NLAYERS=4`.
+
 ## Not yet done
 
-- **`NREP` (GQA ratio) is now the leading, most-correlated hypothesis** —
-  test it directly and in isolation: take an already-known-coherent
-  checkpoint (TinyStories or one of the smaller GQA checkpoints already
-  validated on this branch, `NREP=2`) and artificially construct or find
-  a real checkpoint at similar scale but with `NREP` of 3 or more, to
-  separate "GQA ratio" from "scale" as cleanly as possible. If a
-  same-scale, `NREP∈{1,2}` checkpoint stays coherent while an
-  otherwise-identical `NREP≥3` one degrades, that would confirm the GQA
-  ratio itself (not scale) as the driver.
-- Check `make_repeat_kv_matrix()`/`make_tile_matrix()` in
-  `s1_export_onnx.py` specifically for any subtle correctness issue that
-  only manifests for non-power-of-2 `n_rep` — the matmul-trick GQA
-  reimplementation was never explicitly tested for exact numeric
-  equivalence to HF's own `repeat_kv` beyond the SDK_NATIVE/step-1-3
-  cosine gates, which are known to have their own confounds
-  ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) that could
-  mask a real bug at these ratios specifically.
-- If GQA ratio is ruled out, revisit checkpoint scale directly (compare
-  TinyMistral at 12 layers against SmolLM2 at 30 — both already degrade
-  equally, which weakens a pure-scale explanation but doesn't fully
-  rule out a "scale beyond some low threshold" story).
+- **Checkpoint depth/hidden scale is now the leading hypothesis**,
+  cleanly separated from GQA ratio by the Felladrin test above. Next:
+  bisect on depth directly — find or construct a real checkpoint at an
+  intermediate layer count (e.g. 6-8 layers) to locate where coherence
+  breaks down, and/or vary `hidden` independently of `NLAYERS` to check
+  whether hidden size (not layer count specifically) is the real driver
+  (TinyStories: `hidden=256`; every degraded checkpoint so far:
+  `hidden≥768`).
+- Cross-reference with the already-documented, separate `SDK_NATIVE`
+  cosine degradation with model scale
+  ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) — that
+  finding is about the *SDK emulator specifically*, confirmed **not**
+  present on real hardware for at least one case (TinyStories). Whether
+  there's a related but distinct *hardware*-side scale effect (this
+  finding) sharing a root cause with the emulator-side one, or is fully
+  independent, is unconfirmed.
+- The old "Not yet done" items below (GQA-ratio-specific tests) are now
+  superseded by the result above; kept struck through for the record
+  rather than deleted, since the investigation trail matters as much as
+  the conclusion.
+
+~~`NREP` (GQA ratio) is now the leading, most-correlated hypothesis~~ —
+refuted, see above.
 
 ## Impact
 

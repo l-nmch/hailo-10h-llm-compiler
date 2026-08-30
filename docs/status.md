@@ -54,19 +54,20 @@ are now supported and verified through quantization on real checkpoints
 **A third real-hardware fidelity gap was found, this time on
 base-scope (no-cache) generation** — previously this project's control
 test for "is the compiled model itself sound", always coherent before
-now. Reproduced on two independent checkpoints (`TinyMistral-248M`,
+now. Reproduced on three independent checkpoints (`TinyMistral-248M`,
 `SmolLM2-135M` — the latter also confirming the historical "30-layer
 memory wall" no longer applies with this project's current
-recipe/memory discipline, since it compiled cleanly). The identical
-prompt through float32 HF is coherent in both cases, ruling out weak
-checkpoints as the explanation, and the lm_head-splitting surgery was
-directly cleared as the cause (forcing it onto the always-coherent
-TinyStories baseline produced fully coherent output, unaffected).
-**The strongest lead**: every degraded checkpoint (`Qwen2.5-0.5B`,
-`TinyMistral-248M`, `SmolLM2-135M`) shares a non-power-of-2 GQA ratio
-(`NREP` 3, 4, or 7) that every coherent checkpoint validated on this
-branch lacks (`NREP` 1 or 2) — scale alone doesn't fit as cleanly
-(12-layer TinyMistral and 30-layer SmolLM2 degrade identically)
+recipe/memory discipline, since it compiled cleanly — and
+`Felladrin/Llama-160M-Chat-v1`). The identical prompt through float32
+HF is coherent in every case, ruling out weak checkpoints as the
+explanation. Two hypotheses were directly tested and cleared: the
+lm_head-splitting surgery (forcing it onto the always-coherent
+TinyStories baseline produced fully coherent output, unaffected), and
+non-power-of-2 GQA ratio (`Felladrin/Llama-160M-Chat-v1` has `NREP=1`,
+pure MHA, and degrades identically — refuting GQA ratio as the driver).
+**Depth/hidden scale is now the leading hypothesis**: every degraded
+checkpoint has `NLAYERS≥12`, the only coherent one (`TinyStories`) has
+`NLAYERS=4`
 ([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
