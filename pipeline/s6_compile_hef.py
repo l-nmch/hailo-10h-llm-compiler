@@ -55,28 +55,50 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
     P = config.paths()
 
     scope = config.NET_SCOPE
     patch_sdk_paths()
 
-    base_group_line = ""
-    if args.include_base_scope:
-        base_group_line = f"{scope} = network_group([{scope}])"
-    compile_script = f"""
-performance_param(compiler_optimization_level=0)
-{scope}__prefill = network_group([{scope}__prefill])
-{scope}__tbt = network_group([{scope}__tbt])
-{base_group_line}
-"""
-    print("=== compile script ===")
-    print(compile_script.strip())
-
     from hailo_sdk_client import ClientRunner
 
     runner = ClientRunner(har=str(P.har_convfixed))
+
+    # lm_head sharding (large VOCAB, e.g. Qwen3's ~152K tokens) is handled
+    # upstream in s3_surgery_and_resources.py, pre-quantization, as N
+    # genuinely independent output convs -- not here. An earlier attempt
+    # used the native `defuse()` model-script command at this stage
+    # instead; abandoned after it caused two severe compile-time failures
+    # of its own at scale (subcluster starvation, then a deterministic
+    # multi-context topology error) -- both traced to defuse's mandatory
+    # auto-generated on-chip concat. See
+    # docs/findings/large-vocab-lm-head-sharding.md and
+    # docs/findings/large-body-multicontext-topology.md.
+
+    base_group_line = ""
+    if args.include_base_scope:
+        base_group_line = f"{scope} = network_group([{scope}])"
+    compile_script = "\n".join([
+        "performance_param(compiler_optimization_level=0)",
+        f"{scope}__prefill = network_group([{scope}__prefill])",
+        f"{scope}__tbt = network_group([{scope}__tbt])",
+        base_group_line,
+    ])
+    print("=== compile script ===")
+    print(compile_script.strip())
+
     runner.load_model_script(compile_script)
     hef_bytes = runner.compile()
+
+    # The compiled HAR embeds the .auto.alls (the exact partition/placement
+    # decisions the compiler made) alongside the quantized weights — extract
+    # it with `hailo har extract <this> --auto-model-script-path x.alls` and
+    # reuse via `hailo compiler <quantized.har> --model-script x.alls` for a
+    # much faster recompile than re-solving placement from scratch. See the
+    # Dataflow Compiler User Guide's "Automatic Model Script" section.
+    runner.save_har(str(P.har_compiled))
+    print(f"compiled HAR (embeds .auto.alls) -> {P.har_compiled}")
 
     hef_path = P.hef
     if args.include_base_scope:

@@ -45,9 +45,8 @@ import config  # must precede numpy imports — sets NPY_PROMOTION_STATE et al.
 
 import numpy as np
 
-# Surgery tables: (input layer, duplication conv to remove, final head count)
+# Surgery table: (input layer, duplication conv to remove, final head count)
 ROPE_LAYERS = None  # built in main(), depends on NET_SCOPE
-MASK_EW_ADDS = ["ew_add3", "ew_add8", "ew_add13", "ew_add18"]  # one per layer
 
 
 def load_hn_from_har(har_path, tmpdir):
@@ -95,13 +94,35 @@ def rope_surgery(layers: dict, scope: str) -> None:
         print(f"  {input_name}: {old_shape} -> {new_shape}; removed {conv_name}")
 
 
-def mask_surgery(layers: dict, scope: str) -> None:
+def mask_surgery(layers: dict, scope: str) -> list:
+    """Rewire every mask-consuming element-wise add directly to input_layer2.
+
+    One such add exists per transformer layer, so the count scales with
+    NLAYERS. Discovered from input_layer2's own consumer list rather than a
+    hardcoded per-layer name pattern (e.g. ew_add3/8/13/18) — a fixed-length
+    list silently produces an inconsistent graph on any checkpoint with a
+    different layer count (see docs/findings/ for the finding this fixed).
+
+    Returns the list of removed slice layer names, for the caller to verify
+    none remain post-surgery.
+    """
     full_width = config.NHEAD * config.SEQ
     il2_name = f"{scope}/input_layer2"
     il2 = layers[il2_name]
-    for i, ew_name in enumerate(MASK_EW_ADDS, start=1):
-        slice_name = f"{scope}/slice{i}"
-        ew_full = f"{scope}/{ew_name}"
+    slice_names = [n for n in il2["output"] if layers[n].get("type") == "slice"]
+    assert slice_names, f"no slice layers found consuming {il2_name}"
+    assert len(slice_names) == config.NLAYERS, (
+        f"found {len(slice_names)} mask slices but NLAYERS={config.NLAYERS} "
+        "— one mask-consuming add is expected per transformer layer"
+    )
+
+    new_il2_output = list(il2["output"])
+    for slice_name in slice_names:
+        consumers = list(layers[slice_name]["output"])
+        assert len(consumers) == 1, (
+            f"{slice_name} has {len(consumers)} consumers, expected exactly 1"
+        )
+        ew_full = consumers[0]
         ew = layers[ew_full]
         # Reconnect directly to input_layer2 (already at full tiled width)
         # and neutralize any repeat/tile expansion params.
@@ -109,9 +130,190 @@ def mask_surgery(layers: dict, scope: str) -> None:
         ew["input_shapes"] = [[-1, 1, config.SEQ, full_width]] * 2
         ew["params"]["input_repeats"] = [[1, 1, 1], [1, 1, 1]]
         ew["params"].pop("input_tiles", None)
-        il2["output"] = [ew_full if x == slice_name else x for x in il2["output"]]
+        new_il2_output = [ew_full if x == slice_name else x for x in new_il2_output]
         del layers[slice_name]
-        print(f"  {ew_name}: rewired to {il2_name}; removed {slice_name}")
+        print(f"  {ew_full}: rewired to {il2_name}; removed {slice_name}")
+    il2["output"] = new_il2_output
+    return slice_names
+
+
+# Layer types safe to duplicate per-shard when breaking up a shared
+# ancestor: cheap, parameter-light ops that sit between the real
+# normalization compute and the split point. Anything else (notably
+# "layer_normalization", the mean/variance reduction) stays shared --
+# duplicating N-way that far back would explode resource usage for no
+# reason, and it's a different HN layer type than what the buggy pass
+# targets anyway.
+_SAFE_TO_DUPLICATE_TYPES = {"slice", "normalization"}
+
+
+def _duplicate_chain_for_shard(layers: dict, params: dict, head_name: str, suffix: str) -> str:
+    """Duplicate a short chain of `_SAFE_TO_DUPLICATE_TYPES`-typed layers,
+    walking backward from `head_name`, into an independent copy for one
+    shard. Returns the new head's name (what the shard should wire its
+    input to) -- or `head_name` unchanged once a non-safe-to-duplicate
+    (shared) layer is reached.
+
+    This exists to route around a DFC 5.3.0 post-fuser bug
+    (`normalization_optimizer.py`): once a "normalization"-typed layer's
+    output fans out to >=3 independently-tracked successors sharing it as
+    an ancestor, `swap_layers_order()` sets `input_shapes` to one entry
+    per successor instead of one, and `Layer.set_input_shapes()` rejects
+    it. Confirmed (by bisection on a fast minimal checkpoint) to trigger
+    at fan-out 3+ regardless of how the multi-output graph was built --
+    see docs/findings/large-vocab-lm-head-sharding.md. Giving each shard
+    its own private copy of the offending layer(s) means the *original*
+    normalization layer's own fan-out never needs to exceed 1.
+    """
+    layer = layers[head_name]
+    if layer.get("type") not in _SAFE_TO_DUPLICATE_TYPES or not layer.get("input"):
+        return head_name
+
+    new_name = f"{head_name}{suffix}"
+    new_layer = dict(layer)
+    pred_name = layer["input"][0]
+    new_pred_name = _duplicate_chain_for_shard(layers, params, pred_name, suffix)
+    new_layer["input"] = [new_pred_name]
+    layers[new_name] = new_layer
+    if new_pred_name != pred_name:
+        # pred was itself duplicated for this shard -- point its (new,
+        # single-consumer) copy at us instead of the original fan-out list.
+        layers[new_pred_name]["output"] = [new_name]
+    else:
+        # pred is shared (not duplicated) -- register as an extra consumer.
+        layers[pred_name]["output"] = layers[pred_name]["output"] + [new_name]
+
+    for key in list(params):
+        if key.startswith(f"{head_name}/"):
+            params[f"{new_name}/{key[len(head_name) + 1:]}"] = params[key]
+
+    return new_name
+
+
+def _collect_safe_chain(layers: dict, head_name: str) -> tuple[list[str], str]:
+    """Names of `_SAFE_TO_DUPLICATE_TYPES`-typed layers walking backward
+    from `head_name` (to be deleted once each shard has its own copy),
+    plus the name of the shared ancestor layer the chain bottoms out at."""
+    chain = []
+    name = head_name
+    while layers[name].get("type") in _SAFE_TO_DUPLICATE_TYPES and layers[name].get("input"):
+        chain.append(name)
+        name = layers[name]["input"][0]
+    return chain, name
+
+
+def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tuple[str, list[str]] | None:
+    # NOTE: `params` is the network's raw weights dict as stored in the
+    # (pre-optimize) HAR's .npz -- key layout "<layer>/<param>:0", plain
+    # numpy arrays. Mutated in place; caller re-serializes to .npz.
+    """Split the monolithic lm_head matmul into N independently-placed
+    output convs, pre-quantization -- the same technique official Hailo
+    HEFs use for large vocabularies (confirmed by inspecting an official
+    Qwen2.5-1.5B HEF's output vstreams: 4 separate ~38K-wide outputs, not
+    one 152K-wide one). No-op when a single shard covers the whole VOCAB.
+
+    Deliberately NOT built on the `defuse()` model-script command (tried
+    first, see docs/findings/large-vocab-lm-head-sharding.md): defuse's
+    mandatory auto-generated on-chip concat is itself the root of two
+    separate, severe compile-time failures at scale (subcluster
+    starvation and a deterministic multi-context topology error) --
+    see docs/findings/large-body-multicontext-topology.md. This function
+    instead produces genuinely independent output layers with no on-chip
+    merge at all, exactly mirroring the official recipe; the host
+    concatenates the N logits arrays after inference (already handled by
+    every downstream cosine check in this pipeline via the
+    `isinstance(out, list)` branch).
+
+    Runs on `resources.har` (pre-`optimize()`) deliberately: this is
+    still the single, undeplicated base scope --
+    `set_kv_cache_global_params` only duplicates into `__prefill`/`__tbt`
+    scopes *inside* `optimize()` (confirmed elsewhere in this project).
+    DFC's own duplication pass then replicates these N output layers into
+    all three scopes automatically, exactly like every other layer --
+    no per-scope handling needed here, unlike the abandoned defuse-based
+    approach which had to target three scopes explicitly.
+    """
+    if n_shards <= 1:
+        return None
+
+    out_layer_name = next(
+        name for name, layer in layers.items()
+        if layer.get("type") == "output_layer" and name.startswith(f"{scope}/")
+        and any(o.startswith("logits") for o in layer.get("original_names", []))
+    )
+    out_layer = layers[out_layer_name]
+    old_name = out_layer["input"][0]
+    old_layer = layers[old_name]
+    vocab = old_layer["output_shapes"][0][-1]
+    bounds = np.linspace(0, vocab, n_shards + 1, dtype=int)
+
+    kernel = params[f"{old_name}/kernel:0"]
+    bias = params[f"{old_name}/bias:0"]
+    pad_const = params[f"{old_name}/padding_const_value:0"]
+
+    # Give each shard its own private copy of the short chain between the
+    # lm_head conv and the nearest shared, expensive-to-duplicate ancestor
+    # (see _duplicate_chain_for_shard's docstring for why: DFC's post-fuser
+    # crashes once a "normalization"-typed layer's fan-out reaches 3).
+    chain_head = old_layer["input"][0]
+    orig_chain, shared_ancestor = _collect_safe_chain(layers, chain_head)
+
+    shard_names = []
+    for i in range(n_shards):
+        lo, hi = int(bounds[i]), int(bounds[i + 1])
+        shard_name = f"{old_name}_shard{i}"
+        shard_out_name = f"{out_layer_name}_shard{i}"
+        dup_head = _duplicate_chain_for_shard(layers, params, chain_head, f"_shard{i}")
+
+        shard_layer = dict(old_layer)
+        shard_layer["input"] = [dup_head]
+        shard_layer["output_shapes"] = [old_layer["output_shapes"][0][:-1] + [hi - lo]]
+        shard_layer["output"] = [shard_out_name]
+        shard_layer["original_names"] = [f"logits_{i}"]
+        shard_layer["params"] = dict(old_layer["params"])
+        shard_layer["params"]["kernel_shape"] = [1, 1, kernel.shape[2], hi - lo]
+        layers[shard_name] = shard_layer
+        if dup_head != chain_head:
+            # dup_head was freshly duplicated for this shard -- its
+            # "output" still carries chain_head's original value (pointing
+            # at the old, since-deleted lm_head conv). Point it at this
+            # shard, its sole real consumer.
+            layers[dup_head]["output"] = [shard_name]
+
+        shard_out_layer = dict(out_layer)
+        shard_out_layer["input"] = [shard_name]
+        shard_out_layer["input_shapes"] = [shard_layer["output_shapes"][0]]
+        shard_out_layer["output_shapes"] = [shard_layer["output_shapes"][0]]
+        shard_out_layer["original_names"] = [f"logits_{i}"]
+        layers[shard_out_name] = shard_out_layer
+        shard_names.append(shard_name)
+
+        params[f"{shard_name}/kernel:0"] = kernel[:, :, :, lo:hi]
+        params[f"{shard_name}/bias:0"] = bias[lo:hi]
+        params[f"{shard_name}/padding_const_value:0"] = pad_const
+
+    del layers[old_name]
+    del layers[out_layer_name]
+    del params[f"{old_name}/kernel:0"]
+    del params[f"{old_name}/bias:0"]
+    del params[f"{old_name}/padding_const_value:0"]
+
+    # The original safe-to-duplicate chain (slice/normalization layers) is
+    # now unused -- each shard has its own copy. Delete it and drop it from
+    # the shared ancestor's consumer list (the per-shard duplicates were
+    # already added there by _duplicate_chain_for_shard).
+    for name in orig_chain:
+        del layers[name]
+        for key in [k for k in params if k.startswith(f"{name}/")]:
+            del params[key]
+    if shared_ancestor != chain_head:
+        layers[shared_ancestor]["output"] = [
+            n for n in layers[shared_ancestor]["output"] if n not in orig_chain
+        ]
+
+    print(f"  lm_head split: {old_name} ({vocab} wide) -> {n_shards} shards ({shard_names[0]}..{shard_names[-1]}), "
+          f"chain [{', '.join(orig_chain)}] duplicated per shard")
+    return old_name, shard_names
 
 
 def build_hailo_config() -> dict:
@@ -205,6 +407,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
+    if config.COSINE_MIN < 0.999:
+        print(f"!! COSINE_MIN overridden to {config.COSINE_MIN} (validated default: 0.999) !!")
     P = config.paths()
 
     scope = config.NET_SCOPE
@@ -227,7 +432,18 @@ def main() -> None:
         rope_surgery(layers, scope)
 
         print("=== surgery 2/2: attention mask (direct wiring to input_layer2) ===")
-        mask_surgery(layers, scope)
+        removed_slices = mask_surgery(layers, scope)
+
+        if config.LM_HEAD_SHARDS > 1:
+            print(f"=== surgery 3/3: lm_head split ({config.LM_HEAD_SHARDS} shards) ===")
+            npz_path = hn_path[: -len(".hn")] + ".npz"
+            params = dict(np.load(npz_path))
+            split_info = lm_head_split(layers, scope, params, config.LM_HEAD_SHARDS)
+            old_name, shard_names = split_info
+            np.savez(npz_path, **params)
+            order = hn["net_params"]["output_layers_order"]
+            idx = order.index(old_name)
+            hn["net_params"]["output_layers_order"] = order[:idx] + shard_names + order[idx + 1:]
 
         with open(hn_path, "w") as f:
             json.dump(hn, f)
@@ -243,8 +459,8 @@ def main() -> None:
     hn_dict = runner.get_hn_dict()["layers"]
     for _, conv_name, _ in ROPE_LAYERS:
         assert conv_name not in hn_dict, f"{conv_name} still present"
-    for i in range(1, len(MASK_EW_ADDS) + 1):
-        assert f"{scope}/slice{i}" not in hn_dict, f"slice{i} still present"
+    for slice_name in removed_slices:
+        assert slice_name not in hn_dict, f"{slice_name} still present"
 
     theta = config.head_dim_frequencies()
     angles = np.outer(np.arange(config.SEQ), theta.astype(np.float64))
@@ -265,10 +481,13 @@ def main() -> None:
     }
     with runner.infer_context(InferenceContext.SDK_NATIVE, gpu_policy=DistributionStrategy.SINGLE) as ctx:
         out = runner.infer(ctx, dataset=calib, data_type="np_array", batch_size=1)
-    logits = np.array(out[0] if isinstance(out, list) else out).reshape(1, 1, -1)
+    # Multiple outputs when config.LM_HEAD_SHARDS > 1 — see
+    # docs/findings/large-vocab-lm-head-sharding.md.
+    shards = out if isinstance(out, list) else [out]
+    logits = np.concatenate([np.array(s).reshape(1, 1, -1) for s in shards], axis=-1)
     sim = config.cosine(hf_logits_last, logits)
     print(f"cosine(HF last position, HAR/SDK_NATIVE, post-surgery): {sim:.6f}")
-    assert sim > 0.999, "surgery broke model fidelity"
+    assert sim > config.COSINE_MIN, "surgery broke model fidelity"
 
     # --- Attach genai external resources ---
     print("=== attaching external resources ===")

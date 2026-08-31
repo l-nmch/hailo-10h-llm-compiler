@@ -4,6 +4,16 @@
 repository is validated. This page records the full evidence chain so the
 next person starts where we stopped.
 
+A shared-across-heads softmax bug in DFC's `SDK_NATIVE`/`SDK_BIT_EXACT`
+emulation was investigated as a possible explanation for the symptoms
+below ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) — ruled
+out. TinyStories' real-hardware base-scope generation (no KV-cache
+involved, same attention/softmax mechanism) is coherent despite carrying
+that exact SDK-emulation defect, proving real silicon computes per-head
+softmax correctly. That bug is confirmed SDK-emulation-only; it does not
+explain the cache-read symptoms below. The cache-addressing evidence
+chain below remains the best lead.
+
 ## Symptom
 
 Multi-token generation through the KV-cache path (`__tbt` scope, via genai

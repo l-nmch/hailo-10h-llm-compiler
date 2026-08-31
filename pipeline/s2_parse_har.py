@@ -36,6 +36,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
+    config.load()  # picks up run_config.json written by step 1, if any
+    if config.COSINE_MIN < 0.999:
+        print(f"!! COSINE_MIN overridden to {config.COSINE_MIN} (validated default: 0.999) !!")
     P = config.paths()
 
     refs = np.load(P.hf_refs)
@@ -85,10 +88,14 @@ def main() -> None:
     }
     with runner.infer_context(InferenceContext.SDK_NATIVE, gpu_policy=DistributionStrategy.SINGLE) as ctx:
         out = runner.infer(ctx, dataset=calib, data_type="np_array", batch_size=1)
-    native_logits = np.array(out[0] if isinstance(out, list) else out).reshape(1, 1, -1)
+    # Multiple outputs when config.LM_HEAD_SHARDS > 1 (large-vocab lm_head
+    # sharding — see docs/findings/large-vocab-lm-head-sharding.md);
+    # concatenate in declaration order to reconstruct the full logits.
+    shards = out if isinstance(out, list) else [out]
+    native_logits = np.concatenate([np.array(s).reshape(1, 1, -1) for s in shards], axis=-1)
     sim = config.cosine(hf_logits_last, native_logits)
     print(f"cosine(HF last position, HAR/SDK_NATIVE, pre-surgery): {sim:.6f}")
-    assert sim > 0.999, "native HAR diverged from HF"
+    assert sim > config.COSINE_MIN, "native HAR diverged from HF"
     print("[OK] step 2 complete")
 
 
