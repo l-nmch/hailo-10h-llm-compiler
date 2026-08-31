@@ -137,6 +137,71 @@ def mask_surgery(layers: dict, scope: str) -> list:
     return slice_names
 
 
+# Layer types safe to duplicate per-shard when breaking up a shared
+# ancestor: cheap, parameter-light ops that sit between the real
+# normalization compute and the split point. Anything else (notably
+# "layer_normalization", the mean/variance reduction) stays shared --
+# duplicating N-way that far back would explode resource usage for no
+# reason, and it's a different HN layer type than what the buggy pass
+# targets anyway.
+_SAFE_TO_DUPLICATE_TYPES = {"slice", "normalization"}
+
+
+def _duplicate_chain_for_shard(layers: dict, params: dict, head_name: str, suffix: str) -> str:
+    """Duplicate a short chain of `_SAFE_TO_DUPLICATE_TYPES`-typed layers,
+    walking backward from `head_name`, into an independent copy for one
+    shard. Returns the new head's name (what the shard should wire its
+    input to) -- or `head_name` unchanged once a non-safe-to-duplicate
+    (shared) layer is reached.
+
+    This exists to route around a DFC 5.3.0 post-fuser bug
+    (`normalization_optimizer.py`): once a "normalization"-typed layer's
+    output fans out to >=3 independently-tracked successors sharing it as
+    an ancestor, `swap_layers_order()` sets `input_shapes` to one entry
+    per successor instead of one, and `Layer.set_input_shapes()` rejects
+    it. Confirmed (by bisection on a fast minimal checkpoint) to trigger
+    at fan-out 3+ regardless of how the multi-output graph was built --
+    see docs/findings/large-vocab-lm-head-sharding.md. Giving each shard
+    its own private copy of the offending layer(s) means the *original*
+    normalization layer's own fan-out never needs to exceed 1.
+    """
+    layer = layers[head_name]
+    if layer.get("type") not in _SAFE_TO_DUPLICATE_TYPES or not layer.get("input"):
+        return head_name
+
+    new_name = f"{head_name}{suffix}"
+    new_layer = dict(layer)
+    pred_name = layer["input"][0]
+    new_pred_name = _duplicate_chain_for_shard(layers, params, pred_name, suffix)
+    new_layer["input"] = [new_pred_name]
+    layers[new_name] = new_layer
+    if new_pred_name != pred_name:
+        # pred was itself duplicated for this shard -- point its (new,
+        # single-consumer) copy at us instead of the original fan-out list.
+        layers[new_pred_name]["output"] = [new_name]
+    else:
+        # pred is shared (not duplicated) -- register as an extra consumer.
+        layers[pred_name]["output"] = layers[pred_name]["output"] + [new_name]
+
+    for key in list(params):
+        if key.startswith(f"{head_name}/"):
+            params[f"{new_name}/{key[len(head_name) + 1:]}"] = params[key]
+
+    return new_name
+
+
+def _collect_safe_chain(layers: dict, head_name: str) -> tuple[list[str], str]:
+    """Names of `_SAFE_TO_DUPLICATE_TYPES`-typed layers walking backward
+    from `head_name` (to be deleted once each shard has its own copy),
+    plus the name of the shared ancestor layer the chain bottoms out at."""
+    chain = []
+    name = head_name
+    while layers[name].get("type") in _SAFE_TO_DUPLICATE_TYPES and layers[name].get("input"):
+        chain.append(name)
+        name = layers[name]["input"][0]
+    return chain, name
+
+
 def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tuple[str, list[str]] | None:
     # NOTE: `params` is the network's raw weights dict as stored in the
     # (pre-optimize) HAR's .npz -- key layout "<layer>/<param>:0", plain
@@ -186,19 +251,34 @@ def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tupl
     bias = params[f"{old_name}/bias:0"]
     pad_const = params[f"{old_name}/padding_const_value:0"]
 
+    # Give each shard its own private copy of the short chain between the
+    # lm_head conv and the nearest shared, expensive-to-duplicate ancestor
+    # (see _duplicate_chain_for_shard's docstring for why: DFC's post-fuser
+    # crashes once a "normalization"-typed layer's fan-out reaches 3).
+    chain_head = old_layer["input"][0]
+    orig_chain, shared_ancestor = _collect_safe_chain(layers, chain_head)
+
     shard_names = []
     for i in range(n_shards):
         lo, hi = int(bounds[i]), int(bounds[i + 1])
         shard_name = f"{old_name}_shard{i}"
         shard_out_name = f"{out_layer_name}_shard{i}"
+        dup_head = _duplicate_chain_for_shard(layers, params, chain_head, f"_shard{i}")
 
         shard_layer = dict(old_layer)
+        shard_layer["input"] = [dup_head]
         shard_layer["output_shapes"] = [old_layer["output_shapes"][0][:-1] + [hi - lo]]
         shard_layer["output"] = [shard_out_name]
         shard_layer["original_names"] = [f"logits_{i}"]
         shard_layer["params"] = dict(old_layer["params"])
         shard_layer["params"]["kernel_shape"] = [1, 1, kernel.shape[2], hi - lo]
         layers[shard_name] = shard_layer
+        if dup_head != chain_head:
+            # dup_head was freshly duplicated for this shard -- its
+            # "output" still carries chain_head's original value (pointing
+            # at the old, since-deleted lm_head conv). Point it at this
+            # shard, its sole real consumer.
+            layers[dup_head]["output"] = [shard_name]
 
         shard_out_layer = dict(out_layer)
         shard_out_layer["input"] = [shard_name]
@@ -212,17 +292,27 @@ def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tupl
         params[f"{shard_name}/bias:0"] = bias[lo:hi]
         params[f"{shard_name}/padding_const_value:0"] = pad_const
 
-    for pred_name in old_layer["input"]:
-        pred = layers[pred_name]
-        pred["output"] = [n for n in pred["output"] if n != old_name] + shard_names
-
     del layers[old_name]
     del layers[out_layer_name]
     del params[f"{old_name}/kernel:0"]
     del params[f"{old_name}/bias:0"]
     del params[f"{old_name}/padding_const_value:0"]
 
-    print(f"  lm_head split: {old_name} ({vocab} wide) -> {n_shards} shards ({shard_names[0]}..{shard_names[-1]})")
+    # The original safe-to-duplicate chain (slice/normalization layers) is
+    # now unused -- each shard has its own copy. Delete it and drop it from
+    # the shared ancestor's consumer list (the per-shard duplicates were
+    # already added there by _duplicate_chain_for_shard).
+    for name in orig_chain:
+        del layers[name]
+        for key in [k for k in params if k.startswith(f"{name}/")]:
+            del params[key]
+    if shared_ancestor != chain_head:
+        layers[shared_ancestor]["output"] = [
+            n for n in layers[shared_ancestor]["output"] if n not in orig_chain
+        ]
+
+    print(f"  lm_head split: {old_name} ({vocab} wide) -> {n_shards} shards ({shard_names[0]}..{shard_names[-1]}), "
+          f"chain [{', '.join(orig_chain)}] duplicated per shard")
     return old_name, shard_names
 
 
