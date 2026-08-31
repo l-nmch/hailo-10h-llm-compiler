@@ -48,11 +48,16 @@ it, and the runtime (`genai.LLM`, hailo-ollama) rejects any HEF that does not
 match its exact expectations.
 
 This project reverse-documented that path by compiling a small open model
-from scratch. Along the way it identified and fixed **five distinct
-incompatibilities** between a vanilla Hugging Face export and what the
-Hailo-10H LLM stack requires (missing `lm_head`, output-shape constraints,
-RoPE input widths, attention-mask broadcasting, a `hailo-config.json` key
-mismatch) — each is documented in
+from scratch, then generalized the pipeline to accept **any** eligible
+Hugging Face checkpoint (`--model <hf-id>`, see below) — validated end to
+end on architectures spanning LLaMA2, Qwen2/Qwen2.5, Qwen3 (QK-Norm), and
+Mistral (sliding-window attention), from 15M to 500M parameters. Along the
+way it identified and fixed over a dozen distinct incompatibilities between
+a vanilla Hugging Face export and what the Hailo-10H LLM stack requires —
+missing `lm_head`, output-shape constraints, RoPE input widths,
+attention-mask broadcasting, a `hailo-config.json` key mismatch, tied
+embeddings, QK-Norm, explicit `head_dim`, q/k/v projection biases, and
+large-vocabulary `lm_head` placement — each documented in
 [`docs/findings/`](docs/findings/index.md) so you do not have to rediscover
 them.
 
@@ -237,22 +242,33 @@ Three complementary ways, in decreasing order of "how much magic":
 | [docs/device-setup.md](docs/device-setup.md) | PCIe driver, HailoRT, hailo-ollama installation; package sources; memory limits |
 | [docs/status.md](docs/status.md) | Honest, detailed state of every pipeline stage and runtime path |
 | [docs/references.md](docs/references.md) | All external resources: model zoo entry, hailort source, blog posts, papers |
-| [docs/findings/index.md](docs/findings/index.md) | Index of all reverse-engineering findings (the five compile fixes + SDK behavior + the open issue) |
+| [docs/findings/index.md](docs/findings/index.md) | Index of all reverse-engineering findings (compile fixes, SDK behavior, open issues) |
+| [Porting-Another-Model](../../wiki/Porting-Another-Model) (wiki) | Eligibility screen and checkpoint-specific checklist for compiling a model other than the TinyStories default |
 
 ## Current limitations
 
 - **KV-cache generation quality** — the open issue: cache reads during
   token-by-token inference return truncated tensors (~30% of columns
-  structurally zeroed), degrading multi-token coherence. Prefill is exact.
-  Details and everything tried so far:
+  structurally zeroed), degrading multi-token coherence. Prefill is exact
+  on the small, original TinyStories checkpoint. Details and everything
+  tried so far:
   [docs/findings/open-tbt-cache-read.md](docs/findings/open-tbt-cache-read.md).
-- **Small models only, so far** — validated on a 25M model; nothing
-  structural prevents larger ones, but calibration memory and compile time
-  grow quickly.
-- **Single model family** — the pipeline hardcodes a LLaMA2-style
-  architecture in `pipeline/config.py` + `s1_export_onnx.py`. Porting to
-  other architectures (GPT-2-style, Phi-style) means adapting the export
-  script; the compile steps are architecture-agnostic.
+- **Deeper/larger-hidden checkpoints show a separate, real-hardware fidelity
+  gap** — every checkpoint with `NLAYERS ≥ 12` tested so far (Qwen2.5-0.5B,
+  TinyMistral-248M, SmolLM2-135M, a 12-layer LLaMA checkpoint) degrades on
+  both prefill and base-scope (no-cache) generation; the only coherent
+  checkpoint has `NLAYERS = 4`. Non-power-of-2 GQA ratio and the
+  lm_head-splitting surgery were both directly ruled out as the cause via
+  isolation tests — depth/hidden scale is the leading open hypothesis, not
+  yet root-caused:
+  [docs/findings/large-checkpoint-prefill-drift.md](docs/findings/large-checkpoint-prefill-drift.md).
+- **Architecture eligibility** — the exporter supports LLaMA2-shaped
+  attention (RMSNorm + RoPE + SwiGLU MLP + GQA-or-MHA), tied or untied
+  embeddings, QK-Norm, explicit `head_dim`, q/k/v projection biases, and
+  sliding-window attention. Gemma-2/3's per-layer *alternating*
+  local/global attention and GPT-2/OPT-style fused-QKV projections are not
+  yet supported — see [Porting-Another-Model](../../wiki/Porting-Another-Model)
+  for the exact screen and what each unsupported case needs.
 - **DFC version pinning** — everything here is validated against DFC 5.3.0.
   The LLM flow is young and its APIs move; expect breakage on other
   versions.
