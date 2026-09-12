@@ -1,8 +1,12 @@
-# Finding 16 — OPEN: base-scope generation degenerates on deeper/larger-hidden checkpoints
+# Finding 16 — OPEN: base-scope generation degenerates once `hidden` crosses a threshold between 288 and 576
 
-**Status: open, reproduced on three independent checkpoints. lm_head
-surgery AND GQA ratio both cleared as the cause — depth/hidden scale
-is the leading remaining hypothesis, root cause not yet found.** Base-scope
+**Status: open, reproduced across eight checkpoints total (merging this
+document's own tests with [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)'s
+independently-recorded hardware data). lm_head surgery, GQA ratio, AND
+checkpoint depth (`NLAYERS`) have all been directly cleared as the
+cause — `hidden` size is the one variable that separates every coherent
+checkpoint from every degraded one. Root cause of *why* `hidden` size
+matters is not yet found.** Base-scope
 generation (no KV-cache — the pipeline's control test for "is the
 compiled model itself sound", used throughout this project to isolate
 the `__tbt` cache-read bug from everything else) fails on
@@ -191,36 +195,82 @@ its "safe" baseline family (`NREP∈{1,2}` was the dividing line
 proposed earlier), yet it degrades anyway. The earlier NREP correlation
 was confounded: every previously-tested non-power-of-2-`NREP`
 checkpoint also happened to be deeper (12-30 layers) than TinyStories
-(4 layers) — this test breaks that confound and points cleanly at
-**depth/hidden scale**, not GQA ratio, as the real variable. Every
-degraded checkpoint so far has `NLAYERS≥12`; the only coherent one has
-`NLAYERS=4`.
+(4 layers) — this test breaks that confound.
+
+## Corrected: `NLAYERS` was also a confound — `hidden` size is the real, cleanly-isolated threshold
+
+At the time this document previously said "every degraded checkpoint has
+`NLAYERS≥12`," that claim had never been checked against
+[sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)'s own
+"Downstream symptom" table, compiled independently, earlier, on a
+different pair of checkpoints. Merging both documents' hardware data
+into one table (fetching the two configs that table never recorded a
+layer count for) settles it:
+
+| Checkpoint | `hidden` | `NLAYERS` | `NREP` | Hardware outcome |
+|---|---|---|---|---|
+| `Mxode/TinyStories-LLaMA2-25M` | 256 | 4 | 2 | ✅ coherent |
+| `nickypro/tinyllama-15M` | 288 | 6 | 1 | ✅ coherent |
+| `HuggingFaceTB/SmolLM2-135M` | 576 | 30 | 3 | ❌ incoherent |
+| `Felladrin/Smol-Llama-101M-Chat-v1` | 768 | **6** | 3 | ❌ incoherent |
+| `JackFram/llama-160m` | 768 | 12 | 1 | ❌ incoherent |
+| `Felladrin/Llama-160M-Chat-v1` | 768 | 12 | 1 | ❌ incoherent |
+| `Locutusque/TinyMistral-248M` | 1024 | 12 | 4 | ❌ incoherent |
+| `Qwen/Qwen2.5-0.5B-Instruct` | 896 | 24 | 7 | ❌ incoherent (prefill drift) |
+
+**`Felladrin/Smol-Llama-101M-Chat-v1` has exactly `NLAYERS=6` — the same
+depth as the coherent `tinyllama-15M` — and still degrades.** Two
+checkpoints at the identical layer count, differing only in `hidden`
+(288 vs 768) and `NREP` (1 vs 3, already independently ruled out above),
+land on opposite outcomes. `NLAYERS` cannot be the threshold: it's 6 on
+both a coherent and an incoherent checkpoint, and 12 on two incoherent
+ones (`JackFram`, `Felladrin/Llama-160M`) that also happen to share
+`hidden=768` with the 6-layer incoherent one. **`hidden` size is the one
+variable that separates every coherent checkpoint from every degraded
+one across all eight data points**: coherent only at `hidden≤288`,
+degraded starting at `hidden≥576`. The `NLAYERS≥12` framing in this
+document's earlier revision was itself a confound from an incomplete
+checkpoint sample, exactly like the `NREP` framing it had already
+corrected once before.
+
+The `(289, 575]` `hidden` range is untested — no checkpoint on record
+sits in that gap, so the exact threshold isn't pinned down further than
+"somewhere between 289 and 575." Bisecting it (finding or requesting a
+real checkpoint at, say, `hidden≈384-448`) is now the sharpest concrete
+next step.
 
 ## Not yet done
 
-- **Checkpoint depth/hidden scale is now the leading hypothesis**,
-  cleanly separated from GQA ratio by the Felladrin test above. Next:
-  bisect on depth directly — find or construct a real checkpoint at an
-  intermediate layer count (e.g. 6-8 layers) to locate where coherence
-  breaks down, and/or vary `hidden` independently of `NLAYERS` to check
-  whether hidden size (not layer count specifically) is the real driver
-  (TinyStories: `hidden=256`; every degraded checkpoint so far:
-  `hidden≥768`).
+- **Bisect the `hidden` threshold** in the untested `(289, 575]` range
+  with a real checkpoint (not scale/GQA ratio — both are settled).
+- Investigate *why* `hidden` size specifically degrades hardware
+  fidelity — candidates: quantization precision at wider activation/
+  weight tensors, an accumulation/overflow effect in wider matmuls, or
+  something specific to this project's own recipe that a comparison
+  against Hailo's official (and officially-working) 1536-hidden Qwen2.5
+  HEF might reveal ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)
+  already flags that official HEF as counter-evidence against a pure
+  hardware ceiling — the driver is more likely this project's specific
+  recipe/pipeline choices at scale, not a chip-level limit).
 - Cross-reference with the already-documented, separate `SDK_NATIVE`
   cosine degradation with model scale
   ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)) — that
   finding is about the *SDK emulator specifically*, confirmed **not**
-  present on real hardware for at least one case (TinyStories). Whether
-  there's a related but distinct *hardware*-side scale effect (this
-  finding) sharing a root cause with the emulator-side one, or is fully
-  independent, is unconfirmed.
-- The old "Not yet done" items below (GQA-ratio-specific tests) are now
-  superseded by the result above; kept struck through for the record
-  rather than deleted, since the investigation trail matters as much as
-  the conclusion.
+  present on real hardware for at least one case (TinyStories), yet its
+  own hardware-side "Downstream symptom" table is exactly what resolved
+  the correction above. Whether the SDK-emulator drift and this
+  hardware-side `hidden`-threshold effect share one root cause or are
+  fully independent phenomena that happen to both track `hidden` is
+  still open.
+- The old "Not yet done" items below (GQA-ratio- and depth-specific
+  tests) are now superseded by the results above; kept struck through
+  for the record rather than deleted, since the investigation trail
+  matters as much as the conclusion.
 
 ~~`NREP` (GQA ratio) is now the leading, most-correlated hypothesis~~ —
 refuted, see above.
+~~Checkpoint depth (`NLAYERS`) is now the leading hypothesis~~ —
+also refuted; `hidden` size is, see above.
 
 ## Impact
 

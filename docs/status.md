@@ -60,14 +60,19 @@ memory wall" no longer applies with this project's current
 recipe/memory discipline, since it compiled cleanly — and
 `Felladrin/Llama-160M-Chat-v1`). The identical prompt through float32
 HF is coherent in every case, ruling out weak checkpoints as the
-explanation. Two hypotheses were directly tested and cleared: the
+explanation. Three hypotheses were directly tested and cleared: the
 lm_head-splitting surgery (forcing it onto the always-coherent
-TinyStories baseline produced fully coherent output, unaffected), and
+TinyStories baseline produced fully coherent output, unaffected),
 non-power-of-2 GQA ratio (`Felladrin/Llama-160M-Chat-v1` has `NREP=1`,
-pure MHA, and degrades identically — refuting GQA ratio as the driver).
-**Depth/hidden scale is now the leading hypothesis**: every degraded
-checkpoint has `NLAYERS≥12`, the only coherent one (`TinyStories`) has
-`NLAYERS=4`
+pure MHA, and degrades identically), and checkpoint depth — merging this
+finding's checkpoints with older hardware data from
+[findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)
+(never previously cross-referenced) turned up a 6-layer checkpoint that
+already degrades, at the same depth as a coherent one, ruling out
+`NLAYERS` too. **`hidden` size is the one variable that separates every
+coherent checkpoint from every degraded one**, across all eight data
+points now on record: coherent only at `hidden≤288`, degraded starting
+at `hidden≥576`
 ([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
@@ -143,12 +148,18 @@ the open findings):
 3. Try `cache_size` / `prefill_size` combinations other than the
    SEQ==CACHE_SIZE assumption.
 4. Reproduce on a second Hailo-10H unit to rule out the specific device.
-5. Continue the scale/quantization-precision investigation for why larger
-   checkpoints (Felladrin, `hidden=768`) produce incoherent base-scope
-   text on hardware while TinyStories doesn't — INT8 measurably better
-   than INT4, `calibset_size` increase made it worse not better; root
-   cause still open (see the "Downstream symptom" section of
-   [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
+5. Continue the `hidden`-size threshold investigation (Finding 16) — now
+   confirmed across 8 checkpoints (coherent only at `hidden≤288`,
+   degraded starting at `hidden≥576`; `NLAYERS` and GQA ratio both
+   directly ruled out). INT8 measurably better than INT4, `calibset_size`
+   increase made it worse not better; root cause of *why* `hidden` size
+   specifically degrades hardware fidelity still open (see
+   [findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)
+   and the "Downstream symptom" section of
+   [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md),
+   whose data resolved the `NLAYERS` question). Sharpest next step: find
+   or construct a checkpoint at `hidden` roughly 300-575 to bisect the
+   threshold further.
 6. Run DFC's **Layer Noise Analysis** checker (`hailo analyze-noise <har>
    --data-path <data>`, confirmed from the official user guide). Blocked
    by the `Cache`/`SDK_QUANTIZED` bug on this project's standard
