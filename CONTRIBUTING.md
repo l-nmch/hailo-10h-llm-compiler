@@ -94,6 +94,12 @@ For behavior changes on hardware, include the diagnostic output
 4. On merge, the `release` workflow tags the merge commit
    `v<VERSION>-dfc<DFC_VERSION>` and publishes the GitHub release.
 
+The only exception is a pull request labeled `no-release`, reserved for
+changes that don't affect users (repository metadata, CI, typos): it must
+leave `VERSION` and `DFC_VERSION` untouched, needs no changelog entry, and
+merging it publishes nothing. Anything touching `pipeline/`, `runtime/`,
+`docker/` or the documented results is a release.
+
 ## Reporting issues
 
 Include: DFC version, HailoRT version, device part number, the exact
