@@ -9,9 +9,10 @@ negative result — is welcome.
 
 - **Fix or extend the pipeline** ([pipeline/](pipeline/)) — e.g. support
   additional architectures in the step-1 exporter.
-- **Attack the open issue** ([docs/findings/open-tbt-cache-read.md](docs/findings/open-tbt-cache-read.md))
-  — cache-read truncation during token-by-token generation. Even a
-  well-documented failed experiment is valuable; add it to the finding page.
+- **Attack the open issue** ([docs/findings/tinymistral-base-scope-degenerate.md](docs/findings/tinymistral-base-scope-degenerate.md))
+  — the real-hardware fidelity gap on checkpoints with a larger hidden
+  size. Even a well-documented failed experiment is valuable; add it to the
+  finding page.
 - **Improve diagnostics** ([runtime/diagnostics/](runtime/diagnostics/)) —
   better probes make every future bug cheaper.
 - **Documentation** — anything you had to figure out that isn't written

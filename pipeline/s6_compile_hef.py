@@ -21,6 +21,15 @@ not exist; forcing release mode and redirecting its temp build dir avoids
 spurious compile-time failures. This is a host-environment workaround only —
 it changes nothing about the compiled artifact.
 
+KV-cache memory layout: every cache input and output of both groups is
+routed through an explicit tf_rgb <-> hailo_rgb format conversion, as the
+official LLM compile scripts do. HailoRT manages each cache as a ring of
+one-token entries shared by ``__prefill`` and ``__tbt``, which assumes a
+token-major layout in memory; left to itself the compiler keeps the core's
+native layout (and a different one per group), so every ring rotation
+mixes tokens and multi-token generation degrades. See
+docs/findings/tbt-cache-read.md.
+
 compiler_optimization_level=0 keeps compile time bounded (~5-8 min with the
 monolithic lm_head); raise it if you want the compiler to spend longer
 searching for better placements.
@@ -42,6 +51,35 @@ def patch_sdk_paths() -> None:
         p._is_release = True
         p._build_dir = tempfile.mkdtemp(prefix=type(p).HAILO_TEMP_DIR_PREFIX)
     print(f"SDKPaths patched: is_release={p.is_release}")
+
+
+def cache_layout_conversions(runner, groups) -> list[str]:
+    """Model-script lines forcing a token-major KV-cache layout in `groups`.
+
+    One ``tf_rgb_to_hailo_rgb`` conversion after every cache input and one
+    ``hailo_rgb_to_tf_rgb`` before every cache output (layers with
+    ``io_type == "cache"``), so the prefill writes and the tbt reads the
+    shared ring buffer one token per entry.
+    """
+    layers = runner.get_hn_dict()["layers"]
+    lines = []
+    for name, layer in sorted(layers.items()):
+        group, short = name.split("/", 1)
+        if group not in groups or layer.get("io_type") != "cache":
+            continue
+        if layer["type"] == "input_layer":
+            succ = layer["output"][0]
+            lines.append(
+                f"{group}/tf_rgb_to_hailo_rgb_from_{short} = "
+                f"format_conversion({name}, {succ}, tf_rgb_to_hailo_rgb)"
+            )
+        elif layer["type"] == "output_layer":
+            pred = layer["input"][0]
+            lines.append(
+                f"{group}/hailo_rgb_to_tf_rgb_to_{short} = "
+                f"format_conversion({pred}, {name}, hailo_rgb_to_tf_rgb)"
+            )
+    return lines
 
 
 def main() -> None:
@@ -79,14 +117,18 @@ def main() -> None:
     base_group_line = ""
     if args.include_base_scope:
         base_group_line = f"{scope} = network_group([{scope}])"
+    cache_lines = cache_layout_conversions(runner, (f"{scope}__prefill", f"{scope}__tbt"))
+    assert cache_lines, "no KV-cache layers found — was step 4 run with set_kv_cache_global_params?"
     compile_script = "\n".join([
         "performance_param(compiler_optimization_level=0)",
         f"{scope}__prefill = network_group([{scope}__prefill])",
         f"{scope}__tbt = network_group([{scope}__tbt])",
         base_group_line,
+        *cache_lines,
     ])
     print("=== compile script ===")
-    print(compile_script.strip())
+    print("\n".join(compile_script.strip().splitlines()[:4]))
+    print(f"    ... + {len(cache_lines)} KV-cache layout conversions")
 
     runner.load_model_script(compile_script)
     hef_bytes = runner.compile()

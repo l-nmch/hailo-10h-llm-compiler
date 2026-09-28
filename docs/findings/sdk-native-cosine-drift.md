@@ -404,7 +404,7 @@ tested here), why depth compounds it (each layer's attention output is
 wrong, corrupting every downstream layer), and is a strong candidate for
 the underlying mechanism behind both the base-scope incoherence
 documented earlier in this file and
-[open-tbt-cache-read.md](open-tbt-cache-read.md)'s KV-cache incoherence —
+[tbt-cache-read.md](tbt-cache-read.md)'s KV-cache incoherence —
 "real words, wrong order/weighting" is exactly the failure mode a
 shared-normalization-across-heads bug produces, and it explains why no
 quantization-recipe or calibration-size change (bias_correction,
@@ -516,7 +516,7 @@ to find out, in order of cost:
 
 Approach (2) above didn't need a new experiment — the answer was already
 sitting in this project's own prior evidence.
-[open-tbt-cache-read.md](open-tbt-cache-read.md)'s own control-experiment
+[tbt-cache-read.md](tbt-cache-read.md)'s own control-experiment
 table and this document's earlier sections both already establish:
 **TinyStories' base-scope generation on real hardware is coherent**
 ("...a small house near a park. The little girl loved...", cosine ≈0.99

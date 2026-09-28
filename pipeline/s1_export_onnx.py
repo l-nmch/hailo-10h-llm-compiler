@@ -297,7 +297,7 @@ def main() -> None:
     # at the last position before lm_head, comparing against a padded position
     # would be meaningless.
     prompt = "Once upon a time there was a little girl"
-    long_prompt = (prompt + " ") * 6
+    long_prompt = (prompt + " ") * max(6, config.SEQ // 5 + 2)
     ids = tokenizer(long_prompt, return_tensors="pt")["input_ids"][:, : config.SEQ]
     assert ids.shape[1] == config.SEQ, "prompt too short to fill SEQ tokens"
 

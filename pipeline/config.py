@@ -70,10 +70,11 @@ LM_HEAD_SHARDS = 1
 # Sequence geometry. SEQ is both the parse/calibration length of the base
 # scope and the total KV-cache size (the pipeline requires CACHE_SIZE == SEQ;
 # the __prefill scope runs at PREFILL_SIZE positions). Not derivable from
-# the checkpoint — a compile-time choice.
-SEQ = 24
-PREFILL_SIZE = 16
-CACHE_SIZE = 24         # MUST equal SEQ for this pipeline
+# the checkpoint — a compile-time choice. SEQ bounds prompt + answer length
+# in hailo-ollama; 128/32 is validated end to end there.
+SEQ = 128
+PREFILL_SIZE = 32
+CACHE_SIZE = 128        # MUST equal SEQ for this pipeline
 
 CALIBSET_SIZE = 32      # number of calibration samples for quantization
 NET_SCOPE = "ts25mpipe" # base scope name; DFC derives <scope>__prefill/<scope>__tbt

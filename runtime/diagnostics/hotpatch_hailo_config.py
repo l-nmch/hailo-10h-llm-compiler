@@ -40,8 +40,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("hef_in")
     parser.add_argument("hef_out")
-    parser.add_argument("--prefill-size", type=int, default=16)
-    parser.add_argument("--cache-size", type=int, default=24)
+    parser.add_argument("--prefill-size", type=int, default=32)
+    parser.add_argument("--cache-size", type=int, default=128)
     args = parser.parse_args()
 
     hef = HefWrapper.from_hef_path(args.hef_in)

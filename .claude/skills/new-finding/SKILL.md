@@ -26,8 +26,8 @@ from the conclusion instead of from zero.
 
 If the bug is still open, write the same shape minus Fix, and add a
 "Current best hypothesis" + "Reproduce it" section (see
-[open-tbt-cache-read.md](../../../docs/findings/open-tbt-cache-read.md)
-for the template to copy).
+[tinymistral-base-scope-degenerate.md](../../../docs/findings/tinymistral-base-scope-degenerate.md)
+for an open finding written this way).
 
 ## Rules while writing
 

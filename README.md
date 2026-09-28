@@ -16,12 +16,19 @@ to iterate quickly yet structurally identical to modern production LLMs
 > ⚠️ **Highly experimental — do not expect it to work.** This project was
 > built by reverse-engineering an undocumented compiler flow against one
 > pinned SDK version (DFC 5.3.0) and one 25M-parameter model. Nothing here is
-> supported, stable, or guaranteed: steps can fail mid-way, APIs move between
-> toolchain versions, and multi-token generation still produces degraded text
-> ([one open issue](docs/findings/open-tbt-cache-read.md)). Read
-> [docs/status.md](docs/status.md) for exactly what works today — and expect
-> to debug everything else yourself. Everything needed to reach the current
-> state is in this repository; getting further is on you.
+> supported, stable, or guaranteed: steps can fail mid-way, and APIs move
+> between toolchain versions. Read [docs/status.md](docs/status.md) for
+> exactly what works today — and expect to debug everything else yourself.
+> Everything needed to reach the current state is in this repository;
+> getting further is on you.
+
+**Where it stands:** the default TinyStories checkpoint, compiled by this
+pipeline, generates coherent text through hailo-ollama on a real
+Hailo-10H — e.g. *"Once upon a time, there was a little dog named Max."* →
+*"Max was a very happy dog who lived in a big house with his family and
+friends. One day, Max saw a big red ball in the park…"*. Larger
+checkpoints compile and serve too, but still show a separate fidelity gap
+(see [Current limitations](#current-limitations)).
 
 ---
 
@@ -56,8 +63,10 @@ way it identified and fixed over a dozen distinct incompatibilities between
 a vanilla Hugging Face export and what the Hailo-10H LLM stack requires —
 missing `lm_head`, output-shape constraints, RoPE input widths,
 attention-mask broadcasting, a `hailo-config.json` key mismatch, tied
-embeddings, QK-Norm, explicit `head_dim`, q/k/v projection biases, and
-large-vocabulary `lm_head` placement — each documented in
+embeddings, QK-Norm, explicit `head_dim`, q/k/v projection biases,
+large-vocabulary `lm_head` placement, the KV-cache memory layout shared by
+the prefill and token-by-token groups, and how the server applies the
+tokenizer (BOS, spacing) — each documented in
 [`docs/findings/`](docs/findings/index.md) so you do not have to rediscover
 them.
 
@@ -84,7 +93,8 @@ obtain them from Hailo's developer portal yourself.
         ▼
  s3_surgery_resources.py  HAR graph surgery: RoPE/mask input wiring,
         │                 then attach external resources (embeddings,
-        │                 tokenizer, rope table, hailo-config.json)
+        │                 server-adapted tokenizer, rope table,
+        │                 hailo-config.json)
         ▼
  s4_optimize_kvcache.py   Quantization with KV-cache duplication
         │                 (INT4 weights / INT8 activations, a16 embeddings)
@@ -92,7 +102,8 @@ obtain them from Hailo's developer portal yourself.
  s5_fix_convolutions.py   Post-quantization shape-consistency pass
         │
         ▼
- s6_compile_hef.py      HAR → HEF (two network groups: __prefill + __tbt)
+ s6_compile_hef.py      HAR → HEF (two network groups: __prefill + __tbt,
+        │               token-major KV-cache layout on every cache edge)
         │
         ▼
  register_hailo_ollama.py   Publish into hailo-ollama's model store
@@ -185,7 +196,7 @@ automatically, no flags needed:
 
 ```bash
 python /repo/pipeline/s1_export_onnx.py --model <hf-id> \
-    [--seq 24] [--prefill-size 16] [--calibset-size 32] [--net-scope name]
+    [--seq 128] [--prefill-size 32] [--calibset-size 32] [--net-scope name]
 ```
 
 The checkpoint must pass the eligibility screen in
@@ -194,7 +205,8 @@ embeddings, RMSNorm + RoPE + SwiGLU MLP + GQA-or-MHA attention) — anything
 else fails loudly at step 1 or 2, not silently. `--seq`/`--prefill-size`/
 `--calibset-size` aren't derivable from the checkpoint and keep their
 current defaults unless overridden; `--net-scope` defaults to a slug of
-`--model`.
+`--model`. `--seq` is the whole KV-cache: prompt plus answer must fit in
+it (hailo-ollama warns "Conversation context is full" beyond).
 
 > Prefer a single interactive run? [notebooks/walkthrough.ipynb](notebooks/walkthrough.ipynb)
 > executes the same chain end to end, with every step's logic unfolded in
@@ -247,21 +259,18 @@ Three complementary ways, in decreasing order of "how much magic":
 
 ## Current limitations
 
-- **KV-cache generation quality** — the open issue: cache reads during
-  token-by-token inference return truncated tensors (~30% of columns
-  structurally zeroed), degrading multi-token coherence. Prefill is exact
-  on the small, original TinyStories checkpoint. Details and everything
-  tried so far:
-  [docs/findings/open-tbt-cache-read.md](docs/findings/open-tbt-cache-read.md).
-- **Deeper/larger-hidden checkpoints show a separate, real-hardware fidelity
-  gap** — every checkpoint with `NLAYERS ≥ 12` tested so far (Qwen2.5-0.5B,
-  TinyMistral-248M, SmolLM2-135M, a 12-layer LLaMA checkpoint) degrades on
-  both prefill and base-scope (no-cache) generation; the only coherent
-  checkpoint has `NLAYERS = 4`. Non-power-of-2 GQA ratio and the
-  lm_head-splitting surgery were both directly ruled out as the cause via
-  isolation tests — depth/hidden scale is the leading open hypothesis, not
-  yet root-caused:
-  [docs/findings/large-checkpoint-prefill-drift.md](docs/findings/large-checkpoint-prefill-drift.md).
+- **Larger checkpoints show a separate, real-hardware fidelity gap** —
+  coherent generation is validated end to end on TinyStories-25M only.
+  Every checkpoint with `hidden ≥ 576` tested so far (Qwen2.5-0.5B,
+  TinyMistral-248M, SmolLM2-135M, 768-wide LLaMA checkpoints) degrades even
+  on base-scope (no-cache) generation, while `hidden ≤ 288` checkpoints stay
+  coherent; GQA ratio, depth and the lm_head-splitting surgery were each
+  ruled out by isolation tests. Root cause open:
+  [docs/findings/tinymistral-base-scope-degenerate.md](docs/findings/tinymistral-base-scope-degenerate.md).
+- **Context length** — the KV-cache size (`--seq`, default 128) caps
+  prompt + answer; it is a compile-time constant.
+- **Notebooks lag behind** — [notebooks/](notebooks/) predate the KV-cache
+  layout fix and still use a 24-token cache; use the `pipeline/` scripts.
 - **Architecture eligibility** — the exporter supports LLaMA2-shaped
   attention (RMSNorm + RoPE + SwiGLU MLP + GQA-or-MHA), tied or untied
   embeddings, QK-Norm, explicit `head_dim`, q/k/v projection biases, and
@@ -276,7 +285,7 @@ Three complementary ways, in decreasing order of "how much magic":
 ## Contributing
 
 Contributions are welcome — especially on the
-[open issue](docs/findings/open-tbt-cache-read.md). See
+[larger-checkpoint fidelity gap](docs/findings/tinymistral-base-scope-degenerate.md). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the proprietary-
 material policy (short version: never commit DFC wheels, official HEFs, or
 anything derived from them).

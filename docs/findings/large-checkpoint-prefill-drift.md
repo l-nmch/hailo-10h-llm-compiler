@@ -12,7 +12,7 @@ via the pre-quantization HN surgery in `s3_surgery_and_resources.py`
 Once the lm_head sharding fix let this checkpoint compile and register
 with hailo-ollama, a `curl .../api/generate` request returned text that
 was not coherent — but before assuming this was the already-documented
-`__tbt` cache-read bug ([open-tbt-cache-read.md](open-tbt-cache-read.md)),
+`__tbt` cache-read bug ([tbt-cache-read.md](tbt-cache-read.md)),
 the user asked whether it could instead be a tokenizer desync
 ([tokenizer-bos-mismatch.md](tokenizer-bos-mismatch.md) documents this
 exact failure class from an earlier checkpoint). Both were ruled out by
@@ -76,10 +76,21 @@ cause.
 sharding) — degraded with the identical constant-token-repetition
 signature, refuting non-power-of-2 GQA ratio as the driver (full detail
 in [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)'s
-"GQA-ratio hypothesis refuted" section). Checkpoint depth/hidden scale
-alone (candidate 2, narrowed) is now the leading explanation — every
-degraded checkpoint has `NLAYERS≥12`, the only coherent one has
-`NLAYERS=4`.
+"GQA-ratio hypothesis refuted" section).
+
+**Further correction: `NLAYERS` was also a confound.** Merging this
+investigation's checkpoints with [sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)'s
+independently-recorded hardware data (never previously cross-referenced)
+into one table shows `Felladrin/Smol-Llama-101M-Chat-v1` — `NLAYERS=6`,
+the *same* depth as the coherent `tinyllama-15M` — already degrades.
+`NLAYERS` cannot be the threshold when it's 6 on both a coherent and a
+degraded checkpoint. **`hidden` size is the one variable that separates
+every coherent checkpoint from every degraded one across all eight data
+points on record**: coherent only at `hidden≤288`, degraded starting at
+`hidden≥576` (Qwen2.5-0.5B's `hidden=896` fits this cleanly). Full table
+and detail in
+[tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)'s
+"Corrected: `NLAYERS` was also a confound" section.
 
 ## What's still open
 
@@ -91,19 +102,20 @@ The drift's source is unconfirmed. Candidates, none yet tested:
    [large-vocab-lm-head-sharding.md](large-vocab-lm-head-sharding.md))
    introduces a numeric discrepancy somewhere in the duplicated
    slice/normalization chain.
-2. Quantization fidelity genuinely degrades at this checkpoint's
-   depth/hidden scale (24 layers here; GQA ratio itself is now ruled
-   out as a confound — see the update above) — consistent with the
-   already-documented general pattern that larger checkpoints show
-   worse cosine
+2. Quantization fidelity genuinely degrades once `hidden` crosses
+   somewhere between 288 and 576 (Qwen2.5-0.5B's `hidden=896` is well
+   past that threshold) — consistent with the already-documented
+   general pattern that wider checkpoints show worse cosine
    ([sdk-native-cosine-drift.md](sdk-native-cosine-drift.md)'s "Downstream
-   symptom" section, though that finding was about a different,
-   smaller-vocabulary checkpoint). **Now the leading candidate.**
-3. Something specific to the 24-layer scale itself, independent of both
-   of the above — the same scale that also produced the separate
-   `__tbt` context-partition topology error when this checkpoint was
-   tested with the (now-abandoned) `defuse()` sharding approach
-   ([large-body-multicontext-topology.md](large-body-multicontext-topology.md)).
+   symptom" section — the same section whose data resolved the
+   `NLAYERS` confound above). **Now the leading candidate.**
+3. Something specific to this checkpoint's 24-layer scale, independent
+   of both of the above — the same scale that also produced the
+   separate `__tbt` context-partition topology error when this
+   checkpoint was tested with the (now-abandoned) `defuse()` sharding
+   approach ([large-body-multicontext-topology.md](large-body-multicontext-topology.md)).
+   Weaker candidate now that `hidden` (not depth) is the confirmed
+   threshold variable, but not ruled out.
 
 ## Next steps (not started)
 
@@ -114,9 +126,14 @@ The drift's source is unconfirmed. Candidates, none yet tested:
    TinyStories surgery-isolation test — surgery cleared.
 2. ~~Compare against a shallower real checkpoint with a similarly odd
    GQA ratio, to separate "scale" from "GQA ratio".~~ Done via that
-   same finding's Felladrin-160M test — GQA ratio cleared, depth is now
-   the leading variable.
-3. Re-run the same isolated prefill test on `tabularisai/Qwen3-0.3B-distil`
-   (14 layers, `NREP=2`, once its lm_head is sharded via the new
-   pre-quantization approach) as a middle data point between TinyStories
-   (4 layers, works) and this checkpoint (24 layers, degraded).
+   same finding's Felladrin-160M test — GQA ratio cleared. ~~Depth is
+   now the leading variable~~ — also cleared, see the correction above;
+   `hidden` size is the real threshold.
+3. `tabularisai/Qwen3-0.3B-distil` (14 layers, `NREP=2`, but
+   `hidden=1024` — *wider* than Qwen2.5-0.5B's 896, not a "middle" point
+   on the variable that actually matters) is no longer a useful
+   isolated-prefill test for bisecting the threshold. The real gap to
+   fill is a checkpoint at `hidden` roughly 300-575 — none exists on
+   record yet; this is the same bisection target
+   [tinymistral-base-scope-degenerate.md](tinymistral-base-scope-degenerate.md)
+   now calls out as the sharpest next step.

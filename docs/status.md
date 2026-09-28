@@ -8,10 +8,16 @@ this before investing time, and update it when you learn something new.
 The full compile pipeline works end to end: a Hugging Face checkpoint goes
 through ONNX → HAR → surgery → quantization → HEF, and the resulting
 self-contained HEF loads in genai and hailo-ollama. Prefill inference on
-hardware is numerically faithful (cosine ≈ 1.0 against float32). Greedy
-generation with the KV-cache disabled is coherent. **Multi-token
-generation through the KV-cache path produces degraded text** — one open
-issue remains ([findings/open-tbt-cache-read.md](findings/open-tbt-cache-read.md)).
+hardware is numerically faithful (cosine ≈ 1.0 against float32).
+**Multi-token generation through the KV-cache path now works: hailo-ollama
+serves long, coherent text from a checkpoint compiled by this pipeline**
+(TinyStories-25M, 128-token context). The historic blocker was a KV-cache
+memory-layout mismatch between the `__prefill` and `__tbt` groups, fixed
+at compile time ([findings/tbt-cache-read.md](findings/tbt-cache-read.md)),
+plus two server-side tokenizer quirks fixed in step 3
+([findings/tokenizer-bos-mismatch.md](findings/tokenizer-bos-mismatch.md)).
+Validated end to end on TinyStories-25M only so far; larger checkpoints
+still carry the separate `hidden`-size fidelity gap described below.
 
 **A separate SDK (not hardware) bug was found and closed this session**
 ([findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)):
@@ -20,13 +26,12 @@ attention heads combined instead of per-head — confirmed bit-exact by
 reproducing it from raw QK^T scores, and confirmed present on every
 checkpoint tested including the original TinyStories default (masked
 there by a final-logits cosine that happens to still land near 1.0). It
-looked at first like it might explain the KV-cache incoherence above, but
-that connection is ruled out: TinyStories' real-hardware base-scope
-generation is coherent despite carrying this exact SDK-emulation defect,
-so real silicon does not share it. Net effect: don't trust
-`SDK_NATIVE`/`SDK_BIT_EXACT` cosine as an attention-fidelity signal on
-multi-head checkpoints; the KV-cache incoherence above remains a fully
-separate, still-open question.
+looked at first like it might explain the (since fixed) KV-cache
+incoherence, but that connection is ruled out: TinyStories' real-hardware
+base-scope generation is coherent despite carrying this exact
+SDK-emulation defect, so real silicon does not share it. Net effect: don't
+trust `SDK_NATIVE`/`SDK_BIT_EXACT` cosine as an attention-fidelity signal
+on multi-head checkpoints.
 
 **Generalization in progress.** The pipeline no longer hardcodes one
 checkpoint: `pipeline/s1_export_onnx.py --model <hf-id>` derives every
@@ -60,14 +65,19 @@ memory wall" no longer applies with this project's current
 recipe/memory discipline, since it compiled cleanly — and
 `Felladrin/Llama-160M-Chat-v1`). The identical prompt through float32
 HF is coherent in every case, ruling out weak checkpoints as the
-explanation. Two hypotheses were directly tested and cleared: the
+explanation. Three hypotheses were directly tested and cleared: the
 lm_head-splitting surgery (forcing it onto the always-coherent
-TinyStories baseline produced fully coherent output, unaffected), and
+TinyStories baseline produced fully coherent output, unaffected),
 non-power-of-2 GQA ratio (`Felladrin/Llama-160M-Chat-v1` has `NREP=1`,
-pure MHA, and degrades identically — refuting GQA ratio as the driver).
-**Depth/hidden scale is now the leading hypothesis**: every degraded
-checkpoint has `NLAYERS≥12`, the only coherent one (`TinyStories`) has
-`NLAYERS=4`
+pure MHA, and degrades identically), and checkpoint depth — merging this
+finding's checkpoints with older hardware data from
+[findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)
+(never previously cross-referenced) turned up a 6-layer checkpoint that
+already degrades, at the same depth as a coherent one, ruling out
+`NLAYERS` too. **`hidden` size is the one variable that separates every
+coherent checkpoint from every degraded one**, across all eight data
+points now on record: coherent only at `hidden≤288`, degraded starting
+at `hidden≥576`
 ([findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)).
 
 **Large-vocabulary `lm_head` is now fixed.** Every checkpoint sharing
@@ -104,13 +114,13 @@ never reproduced with the fix that actually landed
 | Graph surgery + resources | ✅ solid on hardware, same emulation caveat | `mask_surgery()`'s `input_layer2` rewiring is correct — it was the prime suspect until hardware evidence ruled it out |
 | Quantization (KV-cache) | ✅ runs (~30 s GPU) | recipe validated by comparison with official `.alls`; no emulator check possible (see below) |
 | Conv repair pass | ✅ kept as safety net | finds 0 issues with the final recipe — its historical cause was ew_add_fusing |
-| HAR → HEF compile | ✅ works (~5–8 min) at `VOCAB` around 32000 | both network groups emitted; lm_head places at optimization_level=0 thanks to the last-position slice; ❌ blocked on large-vocabulary (Qwen-family) checkpoints, likely unfixable on this DFC version |
-| Notebooks ([../notebooks/](../notebooks/)) | ✅ tested headless + on hardware | `walkthrough.ipynb` executes the full chain green (HEF ≈ 44 MiB); its HEF was probed through the raw `InferModel` API: prefill logits cosine 0.998 with exact argmax, tbt degraded identically to pipeline HEFs |
+| HAR → HEF compile | ✅ works (~5–10 min) | both network groups emitted, with explicit token-major layout conversions on every KV-cache edge ([findings/tbt-cache-read.md](findings/tbt-cache-read.md)); large vocabularies handled by lm_head sharding (Finding 12) |
+| Notebooks ([../notebooks/](../notebooks/)) | ⚠️ stale | `walkthrough.ipynb` still uses SEQ=24 and predates the KV-cache layout fix — its HEF reproduces the old degraded tbt behavior; needs re-running against the current pipeline |
 | genai.LLM load | ✅ works | HEF passes the full runtime contract (six inputs, embedded resources, config keys) |
-| hailo-ollama serving | ✅ registration + serving work | content-addressed blob store + manifest procedure documented |
+| hailo-ollama serving | ✅ coherent generation | long, coherent text on TinyStories-25M with a 128-token context; BOS and spacing handled in step 3 |
 | Prefill numerics | ✅ exact | per-position cosines ≈ 1.0 vs float32 reference on hardware |
 | Base-scope greedy generation (no cache) | ✅ coherent | real English text; proves weights/RoPE/GQA/lm_head are sound |
-| **tbt generation via KV-cache** | ❌ degraded | words are real but incoherent across steps — see the open finding |
+| **tbt generation via KV-cache** | ✅ fixed | greedy KV-cache generation matches float32 HF (see [runtime/diagnostics/kv_greedy.py](../runtime/diagnostics/kv_greedy.py)) |
 
 ## Known SDK/toolchain behaviors worth knowing
 
@@ -136,20 +146,28 @@ short version:
 Ranked guesses, informed by everything eliminated so far (full list inside
 the open findings):
 
-1. Instrument the tbt cache read path more deeply (which columns come back
-   zeroed, for which scopes/contexts).
-2. Compare against a second official KV-cache model's HEF structure beyond
-   the recipe level (context descriptors, cache layout declarations).
-3. Try `cache_size` / `prefill_size` combinations other than the
-   SEQ==CACHE_SIZE assumption.
-4. Reproduce on a second Hailo-10H unit to rule out the specific device.
-5. Continue the scale/quantization-precision investigation for why larger
-   checkpoints (Felladrin, `hidden=768`) produce incoherent base-scope
-   text on hardware while TinyStories doesn't — INT8 measurably better
-   than INT4, `calibset_size` increase made it worse not better; root
-   cause still open (see the "Downstream symptom" section of
-   [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md)).
-6. Run DFC's **Layer Noise Analysis** checker (`hailo analyze-noise <har>
+1. Run larger checkpoints (SmolLM2-135M, Qwen2.5-0.5B) through the fixed
+   pipeline and serve them through hailo-ollama — the KV-cache path is no
+   longer the bottleneck, so what remains is the fidelity gap below.
+2. Integrate the optional un-expanded KV-cache (`llm_modifications`, see
+   the last section of [findings/tbt-cache-read.md](findings/tbt-cache-read.md))
+   without having to disable the float32 fidelity gates — it matched
+   float32 HF 8/8 tokens on TinyStories-25M.
+3. Bring the notebooks back in line with the pipeline (SEQ, cache layout
+   conversions, tokenizer resources).
+4. Continue the `hidden`-size threshold investigation (Finding 16) — now
+   confirmed across 8 checkpoints (coherent only at `hidden≤288`,
+   degraded starting at `hidden≥576`; `NLAYERS` and GQA ratio both
+   directly ruled out). INT8 measurably better than INT4, `calibset_size`
+   increase made it worse not better; root cause of *why* `hidden` size
+   specifically degrades hardware fidelity still open (see
+   [findings/tinymistral-base-scope-degenerate.md](findings/tinymistral-base-scope-degenerate.md)
+   and the "Downstream symptom" section of
+   [findings/sdk-native-cosine-drift.md](findings/sdk-native-cosine-drift.md),
+   whose data resolved the `NLAYERS` question). Sharpest next step: find
+   or construct a checkpoint at `hidden` roughly 300-575 to bisect the
+   threshold further.
+5. Run DFC's **Layer Noise Analysis** checker (`hailo analyze-noise <har>
    --data-path <data>`, confirmed from the official user guide). Blocked
    by the `Cache`/`SDK_QUANTIZED` bug on this project's standard
    KV-cache-duplicated `quantized.har` — but confirmed working (reaches

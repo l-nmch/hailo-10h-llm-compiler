@@ -4,7 +4,7 @@
 Drives the ``__prefill`` and ``__tbt`` network groups directly through the
 low-level InferModel API — bypassing genai entirely — to compare on-chip
 activations against a float32 Hugging Face reference. This is the tool that
-isolated the open __tbt cache-read issue (docs/findings/open-tbt-cache-read.md)
+isolated the open __tbt cache-read issue (docs/findings/tbt-cache-read.md)
 and validated prefill as numerically exact.
 
 You need a reference NPZ produced from the float32 model with keys:
@@ -56,8 +56,8 @@ def main() -> None:
     parser.add_argument("--hef", required=True)
     parser.add_argument("--net-scope", default="ts25mpipe")
     parser.add_argument("--reference", required=True, help="HF reference .npz")
-    parser.add_argument("--seq", type=int, default=24, help="total cache size")
-    parser.add_argument("--prefill", type=int, default=16)
+    parser.add_argument("--seq", type=int, default=128, help="total cache size")
+    parser.add_argument("--prefill", type=int, default=32)
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--vocab", type=int, default=32000)
     parser.add_argument("--n-heads", type=int, default=16)
@@ -217,7 +217,7 @@ def main() -> None:
 
     print("\ninterpretation:")
     print("  prefill exact but tbt degraded -> cache-read side issue")
-    print("  (see docs/findings/open-tbt-cache-read.md)")
+    print("  (see docs/findings/tbt-cache-read.md)")
 
 
 if __name__ == "__main__":
