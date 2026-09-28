@@ -37,6 +37,7 @@ checkpoints compile and serve too, but still show a separate fidelity gap
 - [Why this exists](#why-this-exists)
 - [How it works](#how-it-works)
 - [Repository layout](#repository-layout)
+- [Releases and compatibility](#releases-and-compatibility)
 - [Getting started](#getting-started)
 - [Running the compiled model](#running-the-compiled-model)
 - [Documentation](#documentation)
@@ -137,11 +138,26 @@ hailo-10h-llm-compiler/
 ├── .claude/skills/  Working playbooks for continuing the investigation
 │                    (writing a finding, preflight checks, device-level
 │                    debugging) — see CLAUDE.md
+├── .github/         Release automation (version check on PRs, release on merge)
+├── CHANGELOG.md     Release notes, one section per version
+├── VERSION          Project version (semver)
+├── DFC_VERSION      Dataflow Compiler version the release is validated against
 ├── CLAUDE.md        Ground rules + working patterns for picking this up
 ├── LICENSE          MIT
 ├── CONTRIBUTING.md
 └── CODE_OF_CONDUCT.md
 ```
+
+## Releases and compatibility
+
+Every change to `main` is a release, tagged `v<version>-dfc<DFC version>`
+— see [CHANGELOG.md](CHANGELOG.md) and the
+[releases page](https://github.com/l-nmch/hailo-10h-llm-compiler/releases).
+
+| Release | DFC | HailoRT / firmware | Validated on hardware |
+|---|---|---|---|
+| v0.2.x | 5.3.0 | 5.3.0 | TinyStories-25M: coherent generation in hailo-ollama |
+| v0.1.0 | 5.3.0 | 5.3.0 | LLaMA2, Qwen2/2.5, Qwen3, Mistral checkpoints compile and serve; multi-token generation degraded |
 
 ## Getting started
 

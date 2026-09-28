@@ -1,0 +1,42 @@
+name: release
+
+# Each merge into main publishes v<VERSION>-dfc<DFC_VERSION> with the matching
+# CHANGELOG.md section as release notes.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver=$(tr -d '[:space:]' < VERSION)
+          dfc=$(tr -d '[:space:]' < DFC_VERSION)
+          tag="v${ver}-dfc${dfc}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released — nothing to do"
+            exit 0
+          fi
+
+          awk -v v="$ver" 'index($0, "## [" v "]") == 1 { f = 1; print; next }
+                           /^## \[/ { if (f) exit }
+                           f' CHANGELOG.md > section.md
+          [ -s section.md ] || { echo "::error::no CHANGELOG.md section for $ver"; exit 1; }
+
+          title=$(head -1 section.md | sed -E 's/^## \[([^]]+)\]/v\1/')
+          # repo-relative links would break on the release page: pin them to this commit
+          tail -n +2 section.md \
+            | sed -E "s#\]\(((docs|runtime|pipeline|notebooks|docker)/[^)]*|[A-Z]+\.md[^)]*)\)#](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/\1)#g" \
+            > notes.md
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file notes.md

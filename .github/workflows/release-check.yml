@@ -1,0 +1,42 @@
+name: release-check
+
+# Every pull request into main must be a release: bumped VERSION, a matching
+# CHANGELOG.md section, and a tag name that is still free.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  release-check:
+    name: release-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version bumped, changelog entry present, tag still free
+        run: |
+          set -euo pipefail
+          new=$(tr -d '[:space:]' < VERSION)
+          dfc=$(tr -d '[:space:]' < DFC_VERSION)
+          old=$(git show "origin/${{ github.base_ref }}:VERSION" 2>/dev/null | tr -d '[:space:]' || true)
+          old=${old:-0.0.0}
+
+          [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must be X.Y.Z (got '$new')"; exit 1; }
+          [[ "$dfc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::DFC_VERSION must be X.Y.Z (got '$dfc')"; exit 1; }
+
+          highest=$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)
+          if [ "$new" = "$old" ] || [ "$highest" != "$new" ]; then
+            echo "::error::VERSION must be bumped above $old — every change to main is a release"
+            exit 1
+          fi
+
+          tag="v${new}-dfc${dfc}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          fi
+
+          grep -Fq "## [$new]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## [$new]' section"; exit 1; }
+          echo "OK: $old -> $new, merging will release $tag"

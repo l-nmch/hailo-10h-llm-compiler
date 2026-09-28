@@ -78,6 +78,22 @@ This keeps the repository evergreen and diff-stable.
 For behavior changes on hardware, include the diagnostic output
 (cosines, argmax comparisons) demonstrating the effect.
 
+## Releases
+
+`main` is protected and every pull request into it is a release:
+
+1. Bump [`VERSION`](VERSION) (semver: patch for fixes/docs, minor for new
+   capabilities, major for breaking changes to the pipeline's inputs or
+   outputs). Bump [`DFC_VERSION`](DFC_VERSION) when the change is validated
+   against a different Dataflow Compiler.
+2. Add a `## [<VERSION>] — <headline> (DFC <DFC_VERSION>)` section at the
+   top of [CHANGELOG.md](CHANGELOG.md) — it becomes the release notes, so
+   write it for people discovering the project.
+3. The `release-check` workflow blocks the merge until the version is
+   bumped, the changelog section exists and the tag is still free.
+4. On merge, the `release` workflow tags the merge commit
+   `v<VERSION>-dfc<DFC_VERSION>` and publishes the GitHub release.
+
 ## Reporting issues
 
 Include: DFC version, HailoRT version, device part number, the exact
