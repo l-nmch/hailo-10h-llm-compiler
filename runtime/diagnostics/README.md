@@ -11,6 +11,7 @@ bypassing the genai Python wrapper.
 | [hotpatch_hailo_config.py](hotpatch_hailo_config.py) | Fix an embedded `hailo-config.json` in place, no recompile |
 | [manual_prefill_tbt_test.py](manual_prefill_tbt_test.py) | Where does on-chip behavior diverge from float32 HF — at prefill already, or only in token-by-token mode? Needs a reference NPZ from the compile machine |
 | [generate_base_scope.py](generate_base_scope.py) | Does the *model* generate coherent text when the KV-cache is not involved? The control test that isolates cache issues |
+| [kv_greedy.py](kv_greedy.py) | Does greedy generation through the real KV-cache path match float32 HF? Drives `__prefill` + `__tbt` like the genai server; `--mask-mode self` gives a cache-free tbt control |
 | [runtime_inputs.py](runtime_inputs.py) | Shared helpers reproducing the host-side input conventions (mask layout, RoPE tables, uint16 embedding codes) |
 
 ## Recommended debugging order
@@ -22,10 +23,16 @@ bypassing the genai Python wrapper.
    `pipeline/s6_compile_hef.py --include-base-scope` (the default HEF has
    only the two genai network groups — no base scope to drive). That variant
    is diagnostics-only: never serve it through hailo-ollama / genai.LLM().
-3. `manual_prefill_tbt_test.py` — if base-scope generation is coherent,
-   compare prefill vs tbt cosines against a float32 reference to localize
-   the divergence. Prefill exact + tbt degraded = cache-read side issue
-   ([../../docs/findings/open-tbt-cache-read.md](../../docs/findings/open-tbt-cache-read.md)).
+3. `kv_greedy.py` — greedy generation through the real KV-cache path
+   (`__prefill` + `__tbt`, driven exactly like the genai server); compare
+   its ids with a float32 Hugging Face greedy run on the same prompt.
+   `--mask-mode self` masks the whole cache: if that step matches HF's
+   single-token forward while the normal mode does not, the problem is in
+   what `__tbt` reads from the cache (the historic case, fixed in
+   [../../docs/findings/tbt-cache-read.md](../../docs/findings/tbt-cache-read.md)).
+4. `manual_prefill_tbt_test.py` — single prefill + tbt step compared
+   against a reference NPZ at the hidden-state or logits level, for finer
+   localization.
 
 ## Where `wte.npy` comes from
 

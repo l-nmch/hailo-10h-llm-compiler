@@ -55,7 +55,7 @@ Deployed and tested through the full runtime contract: registered with
 hailo-ollama, served a live `genai` generation response without error.
 Output text was incoherent but with recognizable English word fragments
 — the same signature as the already-documented `__tbt` cache-read bug
-([open-tbt-cache-read.md](open-tbt-cache-read.md)) present on every
+([tbt-cache-read.md](tbt-cache-read.md)) present on every
 checkpoint in this project, not a new issue introduced by this
 architecture.
 

@@ -7,7 +7,7 @@ the full prefix each step) validated that the compiled model itself is
 sound: cosine 0.99 vs float32 HF on hardware AND genuinely coherent greedy
 text ("...a small house near a park. The little girl loved"). That control
 test is what isolated the open issue to the KV-cache mechanism
-(docs/findings/open-tbt-cache-read.md).
+(docs/findings/tbt-cache-read.md).
 
 Inefficient by design (O(n^2) recomputation, capped at SEQ total positions)
 — use genai_generate.py for real generation; use this for debugging.
@@ -33,7 +33,7 @@ def main() -> None:
                         help="BOS-terminated prompt token ids (must fit in SEQ)")
     parser.add_argument("--vocab-json", default=None,
                         help="optional {id: piece} map for readable output")
-    parser.add_argument("--seq", type=int, default=24, help="base scope length / cap")
+    parser.add_argument("--seq", type=int, default=128, help="base scope length / cap")
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--vocab", type=int, default=32000)
     parser.add_argument("--n-heads", type=int, default=16)

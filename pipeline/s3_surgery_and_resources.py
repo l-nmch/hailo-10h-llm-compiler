@@ -30,7 +30,8 @@ genai external resources are attached:
 - on-chip embedding table (`embed`) bound to input_layer1
 - RoPE theta table bound to the four cos/sin inputs (on-chip cos/sin
   computation via conversion_type)
-- tokenizer.json and hailo-config.json as named external files
+- tokenizer.json (adapted to the server, see server_tokenizer()) and
+  hailo-config.json as named external files
 
 Usage:
     python s3_surgery_and_resources.py
@@ -316,7 +317,43 @@ def lm_head_split(layers: dict, scope: str, params: dict, n_shards: int) -> tupl
     return old_name, shard_names
 
 
-def build_hailo_config() -> dict:
+def server_tokenizer(tokenizer_json_path) -> tuple[dict, str]:
+    """Adapt the HF tokenizer.json to how the genai server uses it.
+
+    Returns the patched tokenizer dict and the BOS text the chat template
+    must start with (empty when the tokenizer adds no leading special token).
+
+    - The server ignores the post-processor, so a tokenizer whose
+      TemplateProcessing prepends BOS (LLaMA-style) would otherwise lose it —
+      a one-token shift of every position. The BOS goes into the chat
+      template instead.
+    - The server detokenizes one token at a time, so a decoder `Strip`
+      (LLaMA's leading-space strip) removes the space before every word.
+    """
+    with open(tokenizer_json_path) as f:
+        tok = json.load(f)
+
+    bos_text = ""
+    post = tok.get("post_processor") or {}
+    processors = post.get("processors", [post]) if post.get("type") == "Sequence" else [post]
+    for proc in processors:
+        if proc.get("type") != "TemplateProcessing" or not proc.get("single"):
+            continue
+        first = proc["single"][0]
+        if "SpecialToken" in first:
+            special_id = first["SpecialToken"]["id"]
+            bos_text = proc["special_tokens"][special_id]["tokens"][0]
+        break
+
+    decoder = tok.get("decoder") or {}
+    if decoder.get("type") == "Sequence":
+        decoder["decoders"] = [d for d in decoder["decoders"] if d.get("type") != "Strip"]
+    elif decoder.get("type") == "Strip":
+        tok["decoder"] = None
+    return tok, bos_text
+
+
+def build_hailo_config(bos_text: str = "") -> dict:
     """Generation-side configuration embedded into the HEF.
 
     Key naming is contractual: the LLM server reads
@@ -340,7 +377,8 @@ def build_hailo_config() -> dict:
             "do_sample": True,
         },
         # Plain-text concatenation: TinyStories has no chat/role format.
-        "chat_template": (
+        # Leading BOS: see server_tokenizer().
+        "chat_template": bos_text + (
             "{% for message in messages %}"
             "{% for item in message['content'] %}"
             "{{ item['text'] }}"
@@ -493,15 +531,21 @@ def main() -> None:
     print("=== attaching external resources ===")
     attach_resources(runner, wte, theta)  # theta is already the doubled layout
 
-    hailo_config = build_hailo_config()
-    with open(P.hailo_config, "w") as f:
-        json.dump(hailo_config, f, indent=2)
-
     tokenizer_json = P.tokenizer_dir / "tokenizer.json"
     assert tokenizer_json.exists(), (
         f"{tokenizer_json} missing — run s1_export_onnx.py first"
     )
-    runner.add_external_file("tokenizer.json", str(tokenizer_json))
+    server_tok, bos_text = server_tokenizer(tokenizer_json)
+    server_tokenizer_json = P.workdir / "tokenizer_server.json"
+    with open(server_tokenizer_json, "w") as f:
+        json.dump(server_tok, f, ensure_ascii=False)
+    print(f"chat template BOS prefix: {bos_text!r}")
+
+    hailo_config = build_hailo_config(bos_text)
+    with open(P.hailo_config, "w") as f:
+        json.dump(hailo_config, f, indent=2)
+
+    runner.add_external_file("tokenizer.json", str(server_tokenizer_json))
     runner.add_external_file("hailo-config.json", str(P.hailo_config))
 
     runner.save_har(str(P.har_resources))

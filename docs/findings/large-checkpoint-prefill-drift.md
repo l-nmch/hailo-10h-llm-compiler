@@ -12,7 +12,7 @@ via the pre-quantization HN surgery in `s3_surgery_and_resources.py`
 Once the lm_head sharding fix let this checkpoint compile and register
 with hailo-ollama, a `curl .../api/generate` request returned text that
 was not coherent — but before assuming this was the already-documented
-`__tbt` cache-read bug ([open-tbt-cache-read.md](open-tbt-cache-read.md)),
+`__tbt` cache-read bug ([tbt-cache-read.md](tbt-cache-read.md)),
 the user asked whether it could instead be a tokenizer desync
 ([tokenizer-bos-mismatch.md](tokenizer-bos-mismatch.md) documents this
 exact failure class from an earlier checkpoint). Both were ruled out by

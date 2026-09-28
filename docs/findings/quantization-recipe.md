@@ -188,5 +188,5 @@ is the only judge.
 - Prefill numerics: exact vs float32 (per-position cosines ≈ 1.0).
 - Base-scope greedy generation: coherent English.
 - KV-cache multi-token generation: still degraded — see
-  [open-tbt-cache-read.md](open-tbt-cache-read.md). Nothing suggests the
+  [tbt-cache-read.md](tbt-cache-read.md). Nothing suggests the
   recipe is at fault; control experiments isolate the issue to cache reads.
