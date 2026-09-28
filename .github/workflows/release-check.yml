@@ -1,10 +1,13 @@
 name: release-check
 
 # Every pull request into main must be a release: bumped VERSION, a matching
-# CHANGELOG.md section, and a tag name that is still free.
+# CHANGELOG.md section, and a tag name that is still free. Exception: a PR
+# labeled `no-release` (repo metadata, CI, typos) must leave VERSION and
+# DFC_VERSION untouched, and merging it publishes nothing.
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   release-check:
@@ -16,12 +19,24 @@ jobs:
           fetch-depth: 0
 
       - name: Version bumped, changelog entry present, tag still free
+        env:
+          NO_RELEASE: ${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}
         run: |
           set -euo pipefail
           new=$(tr -d '[:space:]' < VERSION)
           dfc=$(tr -d '[:space:]' < DFC_VERSION)
           old=$(git show "origin/${{ github.base_ref }}:VERSION" 2>/dev/null | tr -d '[:space:]' || true)
           old=${old:-0.0.0}
+          old_dfc=$(git show "origin/${{ github.base_ref }}:DFC_VERSION" 2>/dev/null | tr -d '[:space:]' || true)
+
+          if [ "$NO_RELEASE" = "true" ]; then
+            if [ "$new" != "$old" ] || [ "$dfc" != "${old_dfc:-$dfc}" ]; then
+              echo "::error::a no-release PR must not change VERSION or DFC_VERSION"
+              exit 1
+            fi
+            echo "OK: no-release — VERSION stays $old, merging publishes nothing"
+            exit 0
+          fi
 
           [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must be X.Y.Z (got '$new')"; exit 1; }
           [[ "$dfc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::DFC_VERSION must be X.Y.Z (got '$dfc')"; exit 1; }
