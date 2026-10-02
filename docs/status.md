@@ -192,6 +192,38 @@ the open findings):
    the reduced HAR and that the HEF is unchanged; expect it to rule out
    float emulation and re-quantization from that file, so keep a full HAR
    alongside when those are needed.
+7. Apply Hailo's own LLM quantization recipe to the checkpoints that
+   stay incoherent. Step 4 now loads recipes from `.alls` files
+   (`--recipe`, see [recipes/README.md](../recipes/README.md)); the
+   repository ships the default recipe, Hailo's Qwen2 recipe unmodified,
+   and `hailo-llm.alls`, the same recipe with role placeholders so it
+   applies to any checkpoint. Why it matters: on NanoLM-25M-Instruct
+   (`hidden` 312, so Finding 16's `hidden` threshold does not explain it)
+   the chip faithfully runs a quantized model that is itself wrong —
+   quantized emulation of the prefill scores Pearson 0.42 against HF, the
+   chip 0.52, float emulation 0.98. Layer by layer the residual stream holds
+   up to layer 6 and collapses after it; the HF residual stream carries
+   massive activations (one channel grows to ~600, about 100× the median),
+   and the operations that lose the most precision are the 8-bit SwiGLU
+   products (values up to ~760 for a median of 0.1), the softmax
+   `reduce_max` and the RMSNorm square. Those are exactly the operations
+   Hailo's recipe keeps in 16 bits or treats with `quarot`,
+   `smart_softmax_stats` and `layer_norm_decomposition`
+   (`token_equalization`); this pipeline's default recipe treats none of
+   them. On TinyStories-25M (no massive activations), measured on the chip
+   against HF (Pearson, HF top-1 agreement over prefill + 15 decode steps):
+   default recipe 0.982, 13/16; Hailo's recipe without the fused softmax
+   mask, `quarot`, the norm decomposition and `smart_softmax_stats` 0.985,
+   15/16; the full `hailo-llm.alls` 0.936, 7/16 (embeddings fed rotated —
+   `quarot` rotates the residual stream from the input on, and the DFC
+   rotates the embedding table stored in the HEF accordingly, so the
+   runtime needs no change). Next: find which of those four features costs
+   accuracy on TinyStories, then quantize NanoLM-25M with the result and
+   check it in emulation before compiling. `hailo-llm.alls` needs a single
+   lm_head conv (`llm_modifications` splits it into 4 itself) and refuses to
+   resolve on a run whose step 1 sharded the lm_head, which step 1 does
+   for every vocabulary wider than one shard (NanoLM's 32064 included) — a
+   step-1 option to keep the lm_head whole is needed first.
 
 ## Provenance note
 

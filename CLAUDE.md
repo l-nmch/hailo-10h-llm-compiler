@@ -19,7 +19,9 @@ this page for how to work without breaking the project's invariants.
   Read results back via `docker logs`.
 - **Proprietary material policy** — see [CONTRIBUTING.md](CONTRIBUTING.md).
   No DFC wheels, official HEFs/`.alls`/`.hn`, firmware images, or long
-  verbatim excerpts of proprietary source, ever, in any commit.
+  verbatim excerpts of proprietary source, ever, in any commit — the one
+  exception is the publicly downloadable recipe kept in
+  [recipes/](recipes/README.md), see CONTRIBUTING.md.
 - **No dates or timelines** anywhere in committed content — keeps the repo
   evergreen and diff-stable ([CONTRIBUTING.md](CONTRIBUTING.md)).
 

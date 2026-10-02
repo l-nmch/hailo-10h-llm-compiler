@@ -1,0 +1,34 @@
+# Hailo's Qwen2-1.5B-Instruct recipe (hailo-qwen2-1.5b-instruct.alls) with its layer lists replaced by role
+# placeholders, so it applies to any checkpoint this pipeline builds. Differences from the original: calibset_size
+# comes from the run (pass --calibset-size 64 to match it), set_kv_cache_global_params from the run config,
+# weight_group_size only on convs whose input width is a multiple of 128, square_reduce_sum_groups is the largest
+# divisor of hidden <= 16, negative_exponent on every layer instead of Hailo's explicit list, and the three
+# accuracy stages Hailo leaves at their defaults are disabled explicitly.
+# llm_modifications renames the final slice (moved_<slice>) and splits the lm_head conv into <conv>_d<i>
+# (conv_splits, default 4): {final_slice} and {lm_head} resolve to those new names. set_input_mask_to_softmax()
+# makes the mask multiplicative inside the softmax, so step 4 calibrates with a 1/0 mask (the uint8 255/0 wire
+# format is unchanged).
+pre_quantization_optimization(llm_modifications, policy=enabled, conv_splits=4)
+pre_quantization_optimization(ew_add_fusing, policy=disabled)
+set_input_mask_to_softmax()
+set_kv_cache_global_params({prefill_size}, {cache_size})
+model_optimization_flavor(compression_level=0, optimization_level=0)
+model_optimization_config(globals, multiproc_policy=disabled)
+model_optimization_config(calibration, batch_size=1, calibset_size={calibset_size}, use_saitama=True, device=cuda)
+post_quantization_optimization(bias_correction, policy=disabled)
+post_quantization_optimization(adaround, policy=disabled)
+post_quantization_optimization(finetune, policy=disabled)
+quantization_param([{scope}/input_layer1], precision_mode=a16_w16)
+quantization_param([{block_convs}, {lm_head}], precision_mode=a8_w4)
+quantization_param([{residual_adds}], precision_mode=a16_w16)
+quantization_param([{swiglu_mults}], precision_mode=a16_w16)
+quantization_param([{down_proj}], precision_mode=a16_w4_a16)
+quantization_param([{final_slice}], precision_mode=a16_w16)
+quantization_param([{block_convs_g128}], weight_group_size=128)
+pre_quantization_optimization(equalization, layers=[{o_proj}, {up_proj}, {down_proj}], policy=disabled)
+pre_quantization_optimization(matmul_correction, correction_type=zp_comp_block_3, layers=[{qk_matmuls}])
+pre_quantization_optimization(matmul_equalization, layers=[{qk_matmuls}], matmul_bias=disabled, policy=disabled)
+pre_quantization_optimization(quarot, equalize_inputs=enabled, equalize_outputs=disabled, policy=enabled)
+pre_quantization_optimization(layer_norm_decomposition, bit_decomposition_mode=uniform_precision, eq_consumer=False, equalization=disabled, square_reduce_sum_groups={norm_groups}, token_equalization=enabled)
+pre_quantization_optimization(smart_softmax_stats, force_zero_centered=True, optimize_bias=enabled, optimize_bias_algorithm=MSE, use_saitama=True)
+model_optimization_config(negative_exponent, layers={*}, rank=0)

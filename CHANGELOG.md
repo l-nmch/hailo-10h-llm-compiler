@@ -8,6 +8,34 @@ section below (see [CONTRIBUTING.md](CONTRIBUTING.md#releases)).
 The `-dfcX.Y.Z` suffix names the Dataflow Compiler version the release was
 validated against.
 
+## [0.3.0] — Loadable quantization recipes, faster deep-model compiles (DFC 5.3.0)
+
+### Added
+- Step 4 loads its quantization recipe from a `.alls` file:
+  `--recipe recipes/<name>.alls`, with `--print-recipe` to see the resolved
+  script without quantizing. Recipes may use placeholders that step 4
+  resolves against the graph (layer lists by role: residual adds, SwiGLU
+  products, down/up/o projections, QKᵀ matmuls, lm_head, final slice), so
+  one recipe applies to any checkpoint.
+- `recipes/`: the default recipe, Hailo's own Qwen2 LLM recipe unmodified
+  (publicly downloadable, kept as the reference), and `hailo-llm.alls`, that
+  recipe with role placeholders. On TinyStories-25M a reduced form of it
+  matches HF better on the chip than the default (top-1 15/16 vs 13/16);
+  the full form currently scores lower (7/16) and is under investigation.
+- Step 4: `--calib-batch-size` and `--no-saitama` (keeps calibration and
+  bias correction on TensorFlow, avoiding TensorFlow/PyTorch GPU-memory
+  contention on large models).
+
+### Changed
+- Step 6 skips the compiler's automatic spatial-reshape search
+  (`--auto-spatial-reshapes` restores it). On deep checkpoints it cost about
+  an hour per network group and inserted nothing: SmolLM2-135M `__tbt`
+  placement drops from 1 h 22 to 15 min with identical placement decisions;
+  TinyStories-25M HEFs produce bit-identical logits. See Finding 17.
+- `bias_correction` stays on by default, but an on-chip A/B on
+  TinyStories-25M measured no gain from it; `--no-bias-correction` is the
+  fallback when it runs out of GPU memory.
+
 ## [0.2.1] — Release process (DFC 5.3.0)
 
 ### Changed
