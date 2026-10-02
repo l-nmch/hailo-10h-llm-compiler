@@ -34,8 +34,17 @@ compiler_optimization_level=0 keeps compile time bounded (~5-8 min with the
 monolithic lm_head); raise it if you want the compiler to spend longer
 searching for better placements.
 
+Automatic spatial reshapes are disabled by default
+(``allocator_param(enable_auto_spatial_reshapes=False)``). On deep models the
+compiler otherwise runs its "Spatial Reshapes Flow" — a single-threaded,
+iterative search for spatial-reshape insertion points — for roughly an hour
+per network group before the first allocation bucket, and on every model
+compiled here it concluded with no reshape inserted (the decision recorded in
+the compiled HAR's ``.auto.alls``). ``--auto-spatial-reshapes`` restores the
+compiler default. See docs/findings/compile-time-spatial-reshape-search.md.
+
 Usage:
-    python s6_compile_hef.py [--include-base-scope]
+    python s6_compile_hef.py [--include-base-scope] [--auto-spatial-reshapes]
 """
 import argparse
 import tempfile
@@ -90,6 +99,10 @@ def main() -> None:
                              "third network group (writes model_basescope.hef; "
                              "out-of-runtime diagnostics only — tends to break "
                              "hailo-ollama / genai.LLM())")
+    parser.add_argument("--auto-spatial-reshapes", action="store_true",
+                        help="keep the compiler's automatic spatial-reshape "
+                             "search (DFC default; adds ~1 h per network group "
+                             "on deep models, see module docstring)")
     args = parser.parse_args()
     if args.workdir:
         config.set_workdir(args.workdir)
@@ -121,6 +134,7 @@ def main() -> None:
     assert cache_lines, "no KV-cache layers found — was step 4 run with set_kv_cache_global_params?"
     compile_script = "\n".join([
         "performance_param(compiler_optimization_level=0)",
+        "" if args.auto_spatial_reshapes else "allocator_param(enable_auto_spatial_reshapes=False)",
         f"{scope}__prefill = network_group([{scope}__prefill])",
         f"{scope}__tbt = network_group([{scope}__tbt])",
         base_group_line,

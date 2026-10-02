@@ -101,6 +101,30 @@ on the public forum that `adaround` and `finetune` are mutually exclusive
 within a single optimization pass in general (not LLM-specific) — this
 isn't a quirk of our recipe, it's a documented SDK constraint.
 
+### On-device A/B: `bias_correction` on vs off
+
+The table above has no "INT4 without `bias_correction`" row, so the stage's
+own contribution was never isolated. Measured since on TinyStories-25M
+(4 layers, the current KV-cache recipe): one shared s1–s3 run, then s4 with
+the default recipe vs `--no-bias-correction` (the only difference in the
+emitted model script), both compiled with the standard s6 and run on the
+chip. Teacher-forced on HF's greedy tokens (prefill + 15 `__tbt` steps),
+Pearson correlation of the logits vs HF fp32 and HF top-1 agreement:
+
+| s4 recipe | chip vs HF, cache mask | chip vs HF, self mask |
+|---|---|---|
+| `bias_correction` enabled (saitama) | 0.982, top-1 13/16 | 0.987, top-1 6/15 |
+| `bias_correction` disabled | 0.983, top-1 13/16 | 0.987, top-1 9/15 |
+
+Free greedy continuations are both fluent and on-topic. Quantized-vs-float
+emulation of the same two HARs agrees (0.948 with, 0.958 without), within the
+emulator's own noise. **On this model `bias_correction` buys nothing
+measurable.** It is still enabled by default; disabling it is a safe fallback
+when it does not fit in GPU memory (on a 24-layer, 0.5B checkpoint saitama's
+bias correction ran out of a 15 GB GPU at the final lm_head shards while
+TensorFlow, in the same process, still held the memory it had grown into).
+Whether the result carries over to deeper models is unverified.
+
 ### The `adaround` crash: two diagnoses, only the second one was right
 
 An earlier `bias_correction`+`adaround` run crashed with a

@@ -15,9 +15,11 @@ The recipe was derived by direct comparison with Hailo's official Qwen2-1.5B
   misalignments AND wrong argmax outputs.
 - ``bias_correction`` **enabled**, with ``use_saitama=True, device=cuda``
   set directly on its own directive (not just the global calibration one —
-  otherwise it silently falls back to CPU). This is the project's de-facto
-  standard as of the GPU/saitama quantization path: bias_correction alone
-  measurably improves cosine. ``adaround`` combined with it is a mild net
+  otherwise it silently falls back to CPU). It stays the default, but an
+  on-chip A/B on TinyStories-25M measured no gain from it, and it is the
+  stage that runs out of GPU memory first on larger models
+  (``--no-bias-correction`` drops it; see quantization-recipe.md's
+  on-device A/B). ``adaround`` combined with it is a mild net
   negative (not broken, just not worth it); ``finetune`` (QAT) combined
   with it measured catastrophic — not a bug in finetune itself, a real
   measured incompatibility between the two (see
@@ -162,10 +164,17 @@ def main() -> None:
     parser.add_argument("--calibset-size", type=int, default=None,
                         help="override config.CALIBSET_SIZE for this run only "
                              "(default: whatever step 1 resolved, usually 32)")
+    parser.add_argument("--calib-batch-size", type=int, default=1,
+                        help="calibration inference batch size (default 1, the minimum: "
+                             "the lowest GPU memory use; raise it only to speed up "
+                             "calibration on a GPU with spare memory)")
+    parser.add_argument("--no-saitama", action="store_true", default=False,
+                        help="run calibration and bias_correction on DFC's TensorFlow engine instead of "
+                             "saitama (PyTorch); avoids TF/PyTorch VRAM contention on large models")
     parser.add_argument("--bias-correction", dest="bias_correction", action="store_true", default=True,
-                        help="enable bias_correction on saitama/GPU (default: "
-                             "on — this project's validated standard; measurably "
-                             "improves cosine alone, see quantization-recipe.md)")
+                        help="enable bias_correction on saitama/GPU (default: on; an "
+                             "on-chip A/B on TinyStories-25M measured no gain from it, "
+                             "see quantization-recipe.md)")
     parser.add_argument("--no-bias-correction", dest="bias_correction", action="store_false",
                         help="disable bias_correction (matches the official "
                              "Qwen2-1.5B recipe this project started from)")
@@ -209,7 +218,8 @@ def main() -> None:
     print(f"==> recipe: bias_correction={args.bias_correction} adaround={args.adaround} "
           f"finetune={args.finetune} layer_noise_analysis={args.layer_noise_analysis} "
           f"conv_precision={args.conv_precision} compression_level={args.compression_level} "
-          f"optimization_level={args.optimization_level} calibset_size={config.CALIBSET_SIZE}")
+          f"optimization_level={args.optimization_level} calibset_size={config.CALIBSET_SIZE} "
+          f"calib_batch_size={args.calib_batch_size}")
     if args.optimization_level > 0 and not (args.adaround or args.finetune):
         print("!! optimization_level>0 silently re-enables adaround/finetune "
               "regardless of --adaround/--finetune — see sdk-behavior-notes.md !!")
@@ -250,13 +260,18 @@ def main() -> None:
         f"post_quantization_optimization(layer_noise_analysis, {_policy(True)})"
         if args.layer_noise_analysis else ""
     )
+    # saitama = DFC's PyTorch optimization engine. With it, TensorFlow and PyTorch share the GPU in one process and
+    # TensorFlow keeps the VRAM it grew into, which can starve PyTorch on large models; without it everything stays
+    # in TensorFlow (also on GPU on NVIDIA). See docs/findings/quantization-recipe.md.
+    _no_saitama = args.no_saitama
+    _saitama_cal = "" if _no_saitama else ", use_saitama=True, device=cuda"
     model_script = f"""
 pre_quantization_optimization(ew_add_fusing, policy=disabled)
 set_kv_cache_global_params({config.PREFILL_SIZE}, {config.CACHE_SIZE})
 model_optimization_config(globals, multiproc_policy=disabled)
-model_optimization_config(calibration, batch_size=1, calibset_size={config.CALIBSET_SIZE}, use_saitama=True, device=cuda)
+model_optimization_config(calibration, batch_size={args.calib_batch_size}, calibset_size={config.CALIBSET_SIZE}{_saitama_cal})
 model_optimization_flavor(compression_level={args.compression_level}, optimization_level={args.optimization_level})
-post_quantization_optimization(bias_correction, {_policy(args.bias_correction, use_saitama=True)})
+post_quantization_optimization(bias_correction, {_policy(args.bias_correction, use_saitama=not _no_saitama)})
 post_quantization_optimization(adaround, {_policy(args.adaround)})
 post_quantization_optimization(finetune, {_policy(args.finetune)})
 {layer_noise_line}
