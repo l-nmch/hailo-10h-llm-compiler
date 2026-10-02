@@ -12,9 +12,11 @@ staged/changed files before committing — not just once at repo creation.
 ## 1. No proprietary binaries tracked
 
 ```bash
-git ls-files | grep -iE '\.(whl|hef|alls|hn)$|firmware'
+git ls-files | grep -iE '\.(whl|hef|alls|hn)$|firmware' | grep -v '^recipes/'
 ```
-Expect empty output. Also check untracked files about to be added:
+Expect empty output. `recipes/*.alls` are this pipeline's quantization
+recipes plus the one publicly downloadable Hailo recipe CONTRIBUTING.md
+allows; any other `.alls` is out. Also check untracked files about to be added:
 ```bash
 git status --short
 ```

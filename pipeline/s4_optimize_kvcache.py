@@ -44,7 +44,11 @@ docs/findings/sdk-behavior-notes.md), so no cosine is available after this
 step — hardware is the only judge until step 6's compile.
 
 Usage:
-    python s4_optimize_kvcache.py
+    python s4_optimize_kvcache.py [--recipe ../recipes/<name>.alls] [--print-recipe]
+
+``--recipe`` loads a quantization recipe from a ``.alls`` file instead of the
+script above (recipes/README.md lists the shipped recipes and the
+placeholders step 4 resolves against the graph).
 """
 import argparse
 
@@ -109,6 +113,79 @@ def discover_compressible_convs(runner):
     return sorted(keep)
 
 
+def find_roles(runner, compressible) -> dict:
+    """Layer lists by role in the pre-quantization graph, for recipe placeholders (see recipes/README.md)."""
+    layers = runner.get_hn_dict()["layers"]
+    succ = lambda n: [o for o in layers[n].get("output", []) if o in layers]
+    pred = lambda n: [i for i in layers[n].get("input", []) if i in layers]
+    typ = lambda n: layers[n]["type"]
+
+    swiglu = sorted(n for n in layers if typ(n) == "ew_mult" and any(typ(o) == "conv" for o in succ(n)))
+    lm_head = sorted(n for n in compressible if any(typ(o) == "output_layer" for o in succ(n)))
+    block = [n for n in compressible if n not in lm_head]
+    hidden = layers[f"{config.NET_SCOPE}/input_layer1"]["output_shapes"][0][-1]
+    return {
+        "compressible_convs": list(compressible),
+        "block_convs": block,
+        "block_convs_g128": [n for n in block if layers[n]["input_shapes"][0][-1] % 128 == 0],
+        "lm_head": lm_head,
+        "final_slice": sorted(n for n in layers if typ(n) == "slice"),
+        "residual_adds": sorted(n for n in layers if typ(n) == "ew_add"
+                                and any(typ(o) == "layer_normalization" for o in succ(n))),
+        "swiglu_mults": swiglu,
+        "down_proj": sorted({o for m in swiglu for o in succ(m) if typ(o) == "conv"}),
+        "up_proj": sorted({i for m in swiglu for i in pred(m)
+                           if typ(i) == "conv" and layers[i].get("params", {}).get("activation") == "linear"}),
+        "o_proj": sorted(n for n in layers if typ(n) == "conv" and any(typ(i) == "matmul" for i in pred(n))),
+        "qk_matmuls": sorted(n for n in layers if typ(n) == "matmul" and not any(typ(i) == "softmax" for i in pred(n))),
+        "norm_groups": max(g for g in range(1, 17) if hidden % g == 0),
+    }
+
+
+def resolve_recipe(text: str, roles: dict) -> tuple:
+    """Turn a recipe .alls into the model script to load, plus whether the mask gets fused into the softmax.
+
+    Replaces the placeholders listed in recipes/README.md (other braces, e.g. DFC globs like {*}, are kept),
+    forces set_kv_cache_global_params to the run's sizes, and follows the renames llm_modifications applies.
+    """
+    import re
+
+    active = "\n".join(ln.split("#", 1)[0] for ln in text.splitlines())
+    llm = re.search(r"pre_quantization_optimization\(\s*llm_modifications\b[^)]*policy\s*=\s*enabled", active)
+    roles = dict(roles)
+    if llm:
+        # llm_modifications (hailo_sdk_client/post_fuser/algorithms/llm_modifications.py) moves the final slice
+        # before the last norm as moved_<slice>, and splits the conv feeding the first output into conv_splits
+        # convs <conv>_d<i> (default 4) -- precision lines have to name what exists after that rewrite.
+        m = re.search(r"llm_modifications\b[^)]*conv_splits\s*=\s*(\d+)", active)
+        splits = int(m.group(1)) if m else 4
+        roles["final_slice"] = [f"{n.split('/', 1)[0]}/moved_{n.split('/', 1)[1]}" for n in roles["final_slice"]]
+        if splits > 1:
+            if len(roles["lm_head"]) != 1:
+                raise SystemExit(f"recipe enables llm_modifications, which splits a single lm_head conv, but step 1 "
+                                 f"sharded the lm_head into {len(roles['lm_head'])} convs ({roles['lm_head']})")
+            roles["lm_head"] = [f"{roles['lm_head'][0]}_d{i}" for i in range(splits)]
+    values = {
+        "scope": config.NET_SCOPE,
+        "prefill_size": config.PREFILL_SIZE,
+        "cache_size": config.CACHE_SIZE,
+        "calibset_size": config.CALIBSET_SIZE,
+        **{k: (", ".join(v) if isinstance(v, list) else v) for k, v in roles.items()},
+    }
+    empty = sorted(k for k, v in roles.items() if isinstance(v, list) and not v and "{" + k + "}" in active)
+    if empty:
+        raise SystemExit(f"recipe placeholders resolve to no layer in this graph: {empty}")
+    fill = lambda code: re.sub(r"\{(\w+)\}", lambda m: str(values[m.group(1)]) if m.group(1) in values else m.group(0), code)
+    script = "\n".join(fill(ln.split("#", 1)[0]) + ("#" + ln.split("#", 1)[1] if "#" in ln else "")
+                       for ln in text.splitlines())
+    kv = f"set_kv_cache_global_params({config.PREFILL_SIZE}, {config.CACHE_SIZE})"
+    if "set_kv_cache_global_params" in active:
+        script = re.sub(r"set_kv_cache_global_params\([^)]*\)", kv, script)
+    else:
+        script = kv + "\n" + script
+    return script, "set_input_mask_to_softmax" in active
+
+
 def load_sentence_pool(path) -> list:
     """One calibration sentence per non-empty, non-comment line."""
     with open(path) as f:
@@ -155,6 +232,11 @@ def build_calibration(tokenizer, wte, pad_id, sentence_pool):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--workdir", default=None, help="override $DFC_WORKDIR")
+    parser.add_argument("--recipe", default=None,
+                        help="quantization recipe (.alls, see recipes/README.md) replacing the built-in script; "
+                             "the recipe flags below are then ignored")
+    parser.add_argument("--print-recipe", action="store_true",
+                        help="print the resolved model script and exit without quantizing")
     parser.add_argument("--calib-text-file", default=None,
                         help="one calibration sentence per line, overriding "
                              "the built-in generic-domain pool — use this "
@@ -278,11 +360,26 @@ post_quantization_optimization(finetune, {_policy(args.finetune)})
 quantization_param([{scope}/input_layer1], precision_mode=a16_w16)
 quantization_param([{conv_list_str}], precision_mode={args.conv_precision})
 """
+    fused_mask = False
+    if args.recipe:
+        with open(args.recipe) as f:
+            model_script, fused_mask = resolve_recipe(f.read(), find_roles(runner, conv_names))
+        print(f"==> recipe {args.recipe} (recipe flags ignored)")
+    if args.print_recipe:
+        print(model_script.strip())
+        return
     print("=== model script ===")
     print("\n".join(model_script.strip().splitlines()[:6]) + "\n    ... conv list omitted ...")
 
     print("==> building calibration set")
     calib_data = build_calibration(tokenizer, wte, pad_id, sentence_pool)
+    if fused_mask:
+        # set_input_mask_to_softmax() turns the additive mask into a multiplicative one inside the softmax
+        # (hailo_sdk_client/post_fuser/algorithms/softmax_mapping.py multiplies the scores and the exp by it), so
+        # it is calibrated as 1 (allowed) / 0 (blocked). The 0/-100 additive mask would multiply scores by -100 and
+        # zero the softmax sums (NaN statistics). The uint8 255/0 wire format is unchanged.
+        key = f"{config.NET_SCOPE}/input_layer2"
+        calib_data[key] = (calib_data[key] == 0).astype(np.float32)
     print({k: v.shape for k, v in sorted(calib_data.items())})
 
     print("==> optimizing (GPU expected; ~30s on a modern GPU)")
