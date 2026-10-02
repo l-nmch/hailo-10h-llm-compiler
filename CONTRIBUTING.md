@@ -42,6 +42,13 @@ This repository must remain redistributable. **Never commit:**
 Describing behavior, quoting short identifiers (function/key names), and
 linking public sources is fine — the findings pages do exactly that.
 
+One exception: [`recipes/hailo-qwen2-1.5b-instruct.alls`](recipes/hailo-qwen2-1.5b-instruct.alls)
+is Hailo's own quantization recipe, kept unmodified as the reference our
+`hailo-llm.alls` recipe is derived from. It comes from a model archive
+Hailo publishes for download outside the DFC, so shipping it redistributes
+nothing that is not already public; its header names the source. Any other
+official artifact still falls under the list above.
+
 ### No dates or timelines
 
 Do not add build dates, changelog dates, or schedule statements anywhere.

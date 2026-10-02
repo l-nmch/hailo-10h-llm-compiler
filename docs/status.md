@@ -180,6 +180,60 @@ the open findings):
    no-KV-cache recipe used. Next step: chase the `conv11` shape mismatch
    specifically — it's the one remaining blocker on the no-KV-cache path,
    and understanding it might also inform the KV-cache `Cache` bug itself.
+6. Shrink the quantized HAR. On Qwen2.5-0.5B-Instruct (~1 GB of bf16
+   weights) `quantized.har` is ~13.7 GB (about ×14): three graph copies
+   (base, `__prefill`, `__tbt`), each carrying float weights, integer
+   weights and calibration statistics. Writing and re-reading it costs
+   ~5 min per step (s4 save, s5 rewrite). `ClientRunner.save_har()` takes
+   two options the pipeline never passes: `compilation_only=True` ("a
+   reduced size har, containing only compilation related data" — likely
+   the SDK's `QUANTIZED_SLIM_MODEL` state, quantized params only) and
+   `compressed=True`. Untested. Check on TinyStories-25M that s5/s6 accept
+   the reduced HAR and that the HEF is unchanged; expect it to rule out
+   float emulation and re-quantization from that file, so keep a full HAR
+   alongside when those are needed.
+7. Apply Hailo's own LLM quantization recipe to the checkpoints that
+   stay incoherent. Step 4 now loads recipes from `.alls` files
+   (`--recipe`, see [recipes/README.md](../recipes/README.md)); the
+   repository ships the default recipe, Hailo's Qwen2 recipe unmodified,
+   and `hailo-llm.alls`, the same recipe with role placeholders so it
+   applies to any checkpoint. Why it matters: on NanoLM-25M-Instruct
+   (`hidden` 312, so Finding 16's `hidden` threshold does not explain it)
+   the chip faithfully runs a quantized model that is itself wrong —
+   quantized emulation of the prefill scores Pearson 0.42 against HF, the
+   chip 0.52, float emulation 0.98. Layer by layer the residual stream holds
+   up to layer 6 and collapses after it; the HF residual stream carries
+   massive activations (one channel grows to ~600, about 100× the median),
+   and the operations that lose the most precision are the 8-bit SwiGLU
+   products (values up to ~760 for a median of 0.1), the softmax
+   `reduce_max` and the RMSNorm square. Those are exactly the operations
+   Hailo's recipe keeps in 16 bits or treats with `quarot`,
+   `smart_softmax_stats` and `layer_norm_decomposition`
+   (`token_equalization`); this pipeline's default recipe treats none of
+   them. On TinyStories-25M (no massive activations), measured on the chip
+   against HF (Pearson, HF top-1 agreement over prefill + 15 decode steps):
+   default recipe 0.982, 13/16; Hailo's recipe without the fused softmax
+   mask, `quarot`, the norm decomposition and `smart_softmax_stats` 0.985,
+   15/16; the full `hailo-llm.alls` 0.936, 7/16 (embeddings fed rotated —
+   `quarot` rotates the residual stream from the input on, and the DFC
+   rotates the embedding table stored in the HEF accordingly, so the
+   runtime needs no change). Adding the four features back one at a time
+   to the reduced form isolates the loss: `quarot` (0.983, 14/16), the norm
+   decomposition (0.985, 15/16) and `smart_softmax_stats` (0.985, 15/16)
+   are neutral; only `set_input_mask_to_softmax()` degrades (0.945, 9/16),
+   and only when attention spans several cached tokens — why it does here
+   and not in Hailo's own model is open. Next: NanoLM-25M with Hailo's
+   recipe minus the fused mask. Two SDK limits surfaced on it:
+   `weight_group_size=128` has no conv to apply to (`hidden` 312, MLP
+   1092), and `a16_w4_a16` on its first down projection fails while
+   creating hardware parameters — the 16-bit conv is split into high and
+   low sub-convs, and the shift search for the low one takes `log2` of a
+   ratio that is negative when its input statistics do not straddle zero
+   (`a16_w16` passes). `hailo-llm.alls` needs a single
+   lm_head conv (`llm_modifications` splits it into 4 itself) and refuses to
+   resolve on a run whose step 1 sharded the lm_head, which step 1 does
+   for every vocabulary wider than one shard (NanoLM's 32064 included) — a
+   step-1 option to keep the lm_head whole is needed first.
 
 ## Provenance note
 

@@ -125,6 +125,7 @@ flow.
 hailo-10h-llm-compiler/
 ├── docker/          Dockerfiles: NVIDIA CUDA base, AMD ROCm base, Jupyter
 ├── pipeline/        The six compile steps + shared config (s1 → s6)
+├── recipes/         Quantization recipes (.alls) step 4 can load
 ├── notebooks/       The same compile chain and the diagnostics tooling,
 │                    as self-contained executable walkthroughs
 ├── runtime/         Device-side tools: hailo-ollama registration,
@@ -156,6 +157,7 @@ Every change to `main` is a release, tagged `v<version>-dfc<DFC version>`
 
 | Release | DFC | HailoRT / firmware | Validated on hardware |
 |---|---|---|---|
+| v0.3.0 | 5.3.0 | 5.3.0 | TinyStories-25M: coherent generation in hailo-ollama |
 | v0.2.x | 5.3.0 | 5.3.0 | TinyStories-25M: coherent generation in hailo-ollama |
 | v0.1.0 | 5.3.0 | 5.3.0 | LLaMA2, Qwen2/2.5, Qwen3, Mistral checkpoints compile and serve; multi-token generation degraded |
 
