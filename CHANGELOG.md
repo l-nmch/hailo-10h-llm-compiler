@@ -20,8 +20,10 @@ validated against.
 - `recipes/`: the default recipe, Hailo's own Qwen2 LLM recipe unmodified
   (publicly downloadable, kept as the reference), and `hailo-llm.alls`, that
   recipe with role placeholders. On TinyStories-25M a reduced form of it
-  matches HF better on the chip than the default (top-1 15/16 vs 13/16);
-  the full form currently scores lower (7/16) and is under investigation.
+  matches HF better on the chip than the default (top-1 15/16 vs 13/16).
+  The full form scores lower (7/16); measured feature by feature, the
+  fused softmax mask (`set_input_mask_to_softmax()`) is the one that costs
+  accuracy here, the others are neutral.
 - Step 4: `--calib-batch-size` and `--no-saitama` (keeps calibration and
   bias correction on TensorFlow, avoiding TensorFlow/PyTorch GPU-memory
   contention on large models).
