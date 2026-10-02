@@ -172,12 +172,19 @@ def resolve_recipe(text: str, roles: dict) -> tuple:
         "calibset_size": config.CALIBSET_SIZE,
         **{k: (", ".join(v) if isinstance(v, list) else v) for k, v in roles.items()},
     }
-    empty = sorted(k for k, v in roles.items() if isinstance(v, list) and not v and "{" + k + "}" in active)
-    if empty:
-        raise SystemExit(f"recipe placeholders resolve to no layer in this graph: {empty}")
+    empty = {k for k, v in roles.items() if isinstance(v, list) and not v}
     fill = lambda code: re.sub(r"\{(\w+)\}", lambda m: str(values[m.group(1)]) if m.group(1) in values else m.group(0), code)
-    script = "\n".join(fill(ln.split("#", 1)[0]) + ("#" + ln.split("#", 1)[1] if "#" in ln else "")
-                       for ln in text.splitlines())
+    lines = []
+    for ln in text.splitlines():
+        code, sep, comment = ln.partition("#")
+        unresolved = sorted(set(re.findall(r"\{(\w+)\}", code)) & empty)
+        if unresolved:
+            # A role absent from this graph (e.g. no conv input width divisible by 128 for {block_convs_g128}):
+            # the line has nothing to apply to.
+            print(f"!! recipe line dropped, {unresolved} match no layer in this graph: {code.strip()[:100]}")
+            continue
+        lines.append(fill(code) + sep + comment)
+    script = "\n".join(lines)
     kv = f"set_kv_cache_global_params({config.PREFILL_SIZE}, {config.CACHE_SIZE})"
     if "set_kv_cache_global_params" in active:
         script = re.sub(r"set_kv_cache_global_params\([^)]*\)", kv, script)

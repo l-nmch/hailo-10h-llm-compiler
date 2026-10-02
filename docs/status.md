@@ -217,9 +217,19 @@ the open findings):
    15/16; the full `hailo-llm.alls` 0.936, 7/16 (embeddings fed rotated —
    `quarot` rotates the residual stream from the input on, and the DFC
    rotates the embedding table stored in the HEF accordingly, so the
-   runtime needs no change). Next: find which of those four features costs
-   accuracy on TinyStories, then quantize NanoLM-25M with the result and
-   check it in emulation before compiling. `hailo-llm.alls` needs a single
+   runtime needs no change). Adding the four features back one at a time
+   to the reduced form isolates the loss: `quarot` (0.983, 14/16), the norm
+   decomposition (0.985, 15/16) and `smart_softmax_stats` (0.985, 15/16)
+   are neutral; only `set_input_mask_to_softmax()` degrades (0.945, 9/16),
+   and only when attention spans several cached tokens — why it does here
+   and not in Hailo's own model is open. Next: NanoLM-25M with Hailo's
+   recipe minus the fused mask. Two SDK limits surfaced on it:
+   `weight_group_size=128` has no conv to apply to (`hidden` 312, MLP
+   1092), and `a16_w4_a16` on its first down projection fails while
+   creating hardware parameters — the 16-bit conv is split into high and
+   low sub-convs, and the shift search for the low one takes `log2` of a
+   ratio that is negative when its input statistics do not straddle zero
+   (`a16_w16` passes). `hailo-llm.alls` needs a single
    lm_head conv (`llm_modifications` splits it into 4 itself) and refuses to
    resolve on a run whose step 1 sharded the lm_head, which step 1 does
    for every vocabulary wider than one shard (NanoLM's 32064 included) — a
