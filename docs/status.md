@@ -180,6 +180,18 @@ the open findings):
    no-KV-cache recipe used. Next step: chase the `conv11` shape mismatch
    specifically — it's the one remaining blocker on the no-KV-cache path,
    and understanding it might also inform the KV-cache `Cache` bug itself.
+6. Shrink the quantized HAR. On Qwen2.5-0.5B-Instruct (~1 GB of bf16
+   weights) `quantized.har` is ~13.7 GB (about ×14): three graph copies
+   (base, `__prefill`, `__tbt`), each carrying float weights, integer
+   weights and calibration statistics. Writing and re-reading it costs
+   ~5 min per step (s4 save, s5 rewrite). `ClientRunner.save_har()` takes
+   two options the pipeline never passes: `compilation_only=True` ("a
+   reduced size har, containing only compilation related data" — likely
+   the SDK's `QUANTIZED_SLIM_MODEL` state, quantized params only) and
+   `compressed=True`. Untested. Check on TinyStories-25M that s5/s6 accept
+   the reduced HAR and that the HEF is unchanged; expect it to rule out
+   float emulation and re-quantization from that file, so keep a full HAR
+   alongside when those are needed.
 
 ## Provenance note
 
